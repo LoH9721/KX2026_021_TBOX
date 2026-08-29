@@ -25,7 +25,7 @@ static void CanTask_Entry(void const *argument)
     for (;;)
     {
         CanService_Process();
-        if (CanService_GetMockEcallTrigger() != 0U)
+        if (CanService_TakeEcallTrigger() != 0U)
         {
             EcallTask_PostEvent(ECALL_TASK_EVT_CAN_TRIGGER);
         }

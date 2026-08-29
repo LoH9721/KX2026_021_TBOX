@@ -7,6 +7,7 @@
 *******************************************************/
 #include "Ecall.h"
 #include <stddef.h>
+#include "CanService.h"
 #include "GnssService.h"
 #include "Hmi.h"
 #include "ModemService.h"
@@ -33,6 +34,10 @@ static void Ecall_ClearMsd(void)
     m_stEcallMsd.latitude_e7 = 0;
     m_stEcallMsd.longitude_e7 = 0;
     m_stEcallMsd.utc_seconds = 0U;
+    m_stEcallMsd.delta_v_longitudinal_raw = 0U;
+    m_stEcallMsd.delta_v_lateral_raw = 0U;
+    m_stEcallMsd.occupants = 0xFFU;
+    m_stEcallMsd.rollover = 0U;
     for (u8Index = 0U; u8Index < ECALL_GNSS_HISTORY_COUNT; u8Index++)
     {
         m_stEcallMsd.history_latitude_e7[u8Index] = 0;
@@ -81,6 +86,7 @@ void Ecall_Init(void)
     m_u8SessionActive = 0U;
     m_u8CallRequestSent = 0U;
     Hmi_SetEcallCancelWindow(0U);
+    CanService_SetEcallStatus(CAN_SERVICE_ECALL_NO_DISPLAY);
 }
 
 /*******************************************************
@@ -168,6 +174,7 @@ void Ecall_OnManualCancel(void)
     m_u8SessionActive = 0U;
     m_u8CallRequestSent = 0U;
     m_enEcallState = ECALL_STATE_STANDBY;
+    CanService_SetEcallStatus(CAN_SERVICE_ECALL_NO_DISPLAY);
     HMI_LOG_ECALL("MANUAL_CANCELLED\r\n");
     Hmi_ShowEcallState(m_enEcallState);
 }
@@ -224,6 +231,7 @@ void Ecall_OnGnssResult(const EcallMsd_t *pstMsd, uint8_t u8Valid)
     {
         m_u8CallRequestSent = 1U;
         ModemService_RequestEmergencyCall(&m_stEcallMsd);
+        CanService_SetEcallStatus(CAN_SERVICE_ECALL_OUTGOING_CALL);
     }
     m_enEcallState = ECALL_STATE_WAIT_CALL_ACTIVE;
     Hmi_ShowEcallState(m_enEcallState);
@@ -253,6 +261,7 @@ void Ecall_OnCallActive(void)
     if ((m_u8SessionActive != 0U) && (m_enEcallState == ECALL_STATE_WAIT_CALL_ACTIVE))
     {
         m_enEcallState = ECALL_STATE_IN_CALL;
+        CanService_SetEcallStatus(CAN_SERVICE_ECALL_ON_THE_PHONE);
         Hmi_ShowEcallState(m_enEcallState);
     }
 }
@@ -270,6 +279,7 @@ void Ecall_OnCallEnded(void)
     {
         Hmi_SetEcallCancelWindow(0U);
         m_enEcallState = ECALL_STATE_COMPLETE;
+        CanService_SetEcallStatus(CAN_SERVICE_ECALL_END_OF_CALL);
         Hmi_ShowEcallState(m_enEcallState);
         PowerService_SetEcallLock(0U);
         m_u8SessionActive = 0U;
@@ -292,6 +302,7 @@ void Ecall_OnCallFailed(void)
     {
         Hmi_SetEcallCancelWindow(0U);
         m_enEcallState = ECALL_STATE_FAILED;
+        CanService_SetEcallStatus(CAN_SERVICE_ECALL_END_OF_CALL);
         Hmi_ShowEcallState(m_enEcallState);
         PowerService_SetEcallLock(0U);
         m_u8SessionActive = 0U;

@@ -282,6 +282,10 @@ static uint8_t ModemPlatform_PrepareMsdFrame(void)
                                 (uint32_t)ModemPlatform_E7ToAecsRaw(
                                     s_mPlatRun.stLastMsd.history_latitude_e7[u8Index]));
     }
+    pu8Payload[107] = s_mPlatRun.stLastMsd.delta_v_longitudinal_raw;
+    pu8Payload[108] = s_mPlatRun.stLastMsd.delta_v_lateral_raw;
+    pu8Payload[109] = s_mPlatRun.stLastMsd.occupants;
+    pu8Payload[110] = s_mPlatRun.stLastMsd.rollover;
     s_mPlatRun.u16MsdFrameLength = MODEM_PLATFORM_MSD_FRAME_LENGTH;
 
     i32CommandLength = snprintf(s_mPlatRun.acMsdCommand, sizeof(s_mPlatRun.acMsdCommand),

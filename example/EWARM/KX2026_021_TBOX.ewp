@@ -353,12 +353,15 @@
                     <state>$PROJ_DIR$\..\source\3_Bsw\Midwares\FreeRTOS\Source\portable\IAR\ARM_CM4F</state>
                     <state>$PROJ_DIR$\..\drivers\cmsis\Include</state>
                     <state>$PROJ_DIR$\..\drivers\hc32_ll_driver\inc</state>
+                    <state>$PROJ_DIR$\..\drivers\bsp\components\tca9539</state>
+                    <state>$PROJ_DIR$\..\drivers\bsp\ev_hc32f4a8_lqfp176</state>
                     <state>$PROJ_DIR$\..\drivers\cmsis\Device\XHSC\hc32a4xx\Include</state>
                     <state>$PROJ_DIR$\..\source</state>
                     <state>$PROJ_DIR$\..\source\6_Library</state>
                     <state>$PROJ_DIR$\..\source\6_Library\SeggerRtt</state>
                     <state>$PROJ_DIR$\..\source\3_Bsw\Midwares\FreeRTOS\Source\cmsis_rtos</state>
                     <state>$PROJ_DIR$\..\source\5_Mcal\Gpio</state>
+                    <state>$PROJ_DIR$\..\source\5_Mcal\Can</state>
                     <state>$PROJ_DIR$\..\source\2_Rte</state>
                     <state>$PROJ_DIR$\..\source\5_Mcal\Uart</state>
                     <state>D:\TBOX\KX2026_021_TBOX\example\source\1_App\Ecall</state>
@@ -1427,6 +1430,9 @@
                     <state>$PROJ_DIR$/../../common</state>
                     <state>$PROJ_DIR$\..\source\6_Library\SeggerRtt</state>
                     <state>$PROJ_DIR$\..\source\3_Bsw\ModemPort</state>
+                    <state>$PROJ_DIR$\..\source\5_Mcal\Can</state>
+                    <state>$PROJ_DIR$\..\drivers\bsp\components\tca9539</state>
+                    <state>$PROJ_DIR$\..\drivers\bsp\ev_hc32f4a8_lqfp176</state>
                 </option>
                 <option>
                     <name>CCStdIncCheck</name>
@@ -2312,6 +2318,24 @@
         </file>
     </group>
     <group>
+        <name>bsp</name>
+        <group>
+            <name>tca9539</name>
+            <file>
+                <name>$PROJ_DIR$\..\drivers\bsp\components\tca9539\tca9539.c</name>
+            </file>
+        </group>
+        <group>
+            <name>ev_hc32a4a8_lqfp176</name>
+            <file>
+                <name>$PROJ_DIR$\..\drivers\bsp\ev_hc32f4a8_lqfp176\ev_hc32a4a8_lqfp176.c</name>
+            </file>
+            <file>
+                <name>$PROJ_DIR$\..\drivers\bsp\ev_hc32f4a8_lqfp176\ev_hc32a4a8_lqfp176_tca9539.c</name>
+            </file>
+        </group>
+    </group>
+    <group>
         <name>source</name>
         <group>
             <name>1_App</name>
@@ -2497,6 +2521,15 @@
             </group>
             <group>
                 <name>Can</name>
+                <file>
+                    <name>$PROJ_DIR$\..\source\5_Mcal\Can\Can.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\source\5_Mcal\Can\Can.h</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\source\5_Mcal\Can\Can_Cfg.h</name>
+                </file>
             </group>
             <group>
                 <name>Gpio</name>
