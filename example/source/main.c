@@ -59,20 +59,6 @@
 
     __DSB();  /* Arm Errata 838869 */
 }
-void Thread1Handle(void const *argument)
-{
-    for (;;) {
-      GPIO_SetOutPutTogglePin(E_OUTPUT_LED1);
-        osDelay(500);
-    }
-}
-void Thread2Handle(void const *argument)
-{
-    for (;;) {
-      GPIO_SetOutPutTogglePin(E_OUTPUT_LED2);
-        osDelay(200);
-    }
-}
 /**
  * @brief  Main function of template project
  * @param  None
@@ -86,8 +72,7 @@ int32_t main(void)
     LL_PERIPH_WE(0xff);
     Uart_Init();
     (void)SysTick_Init(1000U);
-    osThreadDef(Thread1, Thread1Handle, osPriorityLow, 0, configMINIMAL_STACK_SIZE * 5);
-    osThreadCreate(osThread(Thread1), NULL);
+    /* AppTask owns the current PD9/PD10 indicator test pattern. */
     // osThreadDef(Thread2, Thread2Handle, osPriorityLow, 0, configMINIMAL_STACK_SIZE * 5);
     // osThreadCreate(osThread(Thread2), NULL);
     TaskManager_Start();

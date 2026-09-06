@@ -52,8 +52,8 @@ static void ModemTask_Entry(void const *argument)
     ModemCallState_t enCurrentState;
     ModemServiceState_t enLastServiceState = MODEM_SERVICE_SLEEP;
     ModemServiceState_t enCurrentServiceState;
-    RteKl15State_t enLastKl15State = RTE_KL15_OFF;
-    RteKl15State_t enCurrentKl15State;
+    RteSwitchState_t enLastKl15State = RTE_SWITCH_INACTIVE;
+    RteSwitchState_t enCurrentKl15State;
 
     (void)argument;
     Hmi_ShowTaskStarted("ModemTask");
@@ -64,11 +64,11 @@ static void ModemTask_Entry(void const *argument)
         ModemService_Process();
         enCurrentState = ModemService_GetCallState();
         enCurrentServiceState = ModemService_GetState();
-        enCurrentKl15State = (RteKl15State_t)RteSys_GetU8Sig(RTESYS_U8_KL15_STATE);
+        enCurrentKl15State = RteSys_GetSwitchState(RTESYS_SWITCH_KL15);
 
         if (enCurrentKl15State != enLastKl15State)
         {
-            if (enCurrentKl15State == RTE_KL15_ON)
+            if (enCurrentKl15State == RTE_SWITCH_ACTIVE)
             {
                 HMI_LOG_MODEM("KL15_ON\r\n");
                 ModemService_RequestNetworkOnline();

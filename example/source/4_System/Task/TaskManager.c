@@ -11,6 +11,7 @@
 #include "Hmi.h"
 #include "InputService.h"
 #include "ModemService.h"
+#include "OutputService.h"
 #include "PowerService.h"
 #include "TaskManager.h"
 
@@ -37,6 +38,7 @@ void TaskManager_Start(void)
     ModemService_Init();
     CanService_Init();
     InputService_Init();
+    OutputService_Init();
     Ecall_Init();
 
     PowTask_Create();

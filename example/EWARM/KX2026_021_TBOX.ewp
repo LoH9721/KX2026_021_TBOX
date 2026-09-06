@@ -374,6 +374,7 @@
                     <state>D:\TBOX\KX2026_021_TBOX\example\source\3_Bsw\PowerService</state>
                     <state>D:\TBOX\KX2026_021_TBOX\example\source\4_System\Task</state>
                     <state>D:\TBOX\KX2026_021_TBOX\example\source\3_Bsw\InputService</state>
+                    <state>D:\TBOX\KX2026_021_TBOX\example\source\3_Bsw\OutputService</state>
                 </option>
                 <option>
                     <name>CCStdIncCheck</name>
@@ -2395,6 +2396,15 @@
                 <name>InputService</name>
                 <file>
                     <name>$PROJ_DIR$\..\source\3_Bsw\InputService\InputService.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\source\3_Bsw\InputService\InputService_Cfg.c</name>
+                </file>
+            </group>
+            <group>
+                <name>OutputService</name>
+                <file>
+                    <name>$PROJ_DIR$\..\source\3_Bsw\OutputService\OutputService.c</name>
                 </file>
             </group>
             <group>
