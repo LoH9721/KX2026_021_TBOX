@@ -27,8 +27,8 @@
 #define MODEM_AT_CMD_TCP_CLOSE_FORMAT           "AT+CIPCLOSE=%u\r\n"
 #define MODEM_AT_CMD_PDP_CLOSE                  "AT+NETCLOSE\r\n"
 #define MODEM_AT_CMD_EXTENDED_ERROR_REPORT      "AT+CEER\r\n"
-#define MODEM_AT_CMD_GNSS_POWER_QUERY            "AT+CGNSSPWR?\r\n"
-#define MODEM_AT_CMD_GNSS_POWER_ON               "AT+CGNSSPWR=1\r\n"
+#define MODEM_AT_CMD_GNSS_POWER_OFF              "AT+CGNSSPWR=0\r\n"
+#define MODEM_AT_CMD_GNSS_POWER_ON               "AT+CGNSSPWR=1,0,1\r\n"
 #define MODEM_AT_CMD_GNSS_POSITION               "AT+CGPSINFO\r\n"
 
 /* Dynamic commands must be assembled with snprintf and these format macros. */
@@ -50,7 +50,6 @@
 #define MODEM_AT_RSP_NO_CARRIER                  "NO CARRIER"
 #define MODEM_AT_RSP_SEND                        "+CIPSEND:"
 #define MODEM_AT_RSP_EXTENDED_ERROR_REPORT       "+CEER:"
-#define MODEM_AT_RSP_GNSS_POWER                  "+CGNSSPWR:"
 #define MODEM_AT_RSP_GNSS_READY                  "+CGNSSPWR: READY!"
 #define MODEM_AT_RSP_GNSS_POSITION               "+CGPSINFO:"
 
@@ -86,6 +85,8 @@
 #define MODEM_AT_CFG_DIAL_TIMEOUT_MS            30000U
 #define MODEM_AT_CFG_EXTENDED_ERROR_TIMEOUT_MS    9000U
 #define MODEM_AT_CFG_GNSS_POWER_TIMEOUT_MS        9000U
+#define MODEM_AT_CFG_GNSS_READY_TIMEOUT_MS        15000U
+#define MODEM_AT_CFG_GNSS_POWER_OFF_HOLD_MS        1000U
 #define MODEM_AT_CFG_GNSS_POSITION_TIMEOUT_MS     2000U
 #define MODEM_AT_CFG_GNSS_QUERY_PERIOD_MS         1000U
 #define MODEM_AT_CFG_VOICE_RETRY_ENABLED              0U

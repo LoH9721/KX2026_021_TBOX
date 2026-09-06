@@ -16,11 +16,11 @@
                 <debug>0</debug>
                 <option>
                     <name>OGChipSelectEditMenu</name>
-                    <state>HC32A4A8	XHSC HC32A4A8</state>
+                    <state>HC32F448xA	XHSC HC32F448xA</state>
                 </option>
                 <option>
                     <name>GFPUDeviceSlave</name>
-                    <state>HC32A4A8	XHSC HC32A4A8</state>
+                    <state>HC32F448xA	XHSC HC32F448xA</state>
                 </option>
                 <option>
                     <name>ExePath</name>
@@ -74,7 +74,7 @@
                 </option>
                 <option>
                     <name>OGLastSavedByProductVersion</name>
-                    <state>8.40.1.21529</state>
+                    <state>8.50.9.33458</state>
                 </option>
                 <option>
                     <name>GeneralEnableMisra</name>
@@ -120,12 +120,12 @@
                 </option>
                 <option>
                     <name>GBECoreSlave</name>
-                    <version>27</version>
+                    <version>28</version>
                     <state>39</state>
                 </option>
                 <option>
                     <name>OGUseCmsis</name>
-                    <state>1</state>
+                    <state>0</state>
                 </option>
                 <option>
                     <name>OGUseCmsisDspLib</name>
@@ -137,7 +137,7 @@
                 </option>
                 <option>
                     <name>CoreVariant</name>
-                    <version>27</version>
+                    <version>28</version>
                     <state>39</state>
                 </option>
                 <option>
@@ -156,7 +156,7 @@
                 </option>
                 <option>
                     <name>GFPUCoreSlave2</name>
-                    <version>27</version>
+                    <version>28</version>
                     <state>39</state>
                 </option>
                 <option>
@@ -215,7 +215,7 @@
             <name>ICCARM</name>
             <archiveVersion>2</archiveVersion>
             <data>
-                <version>35</version>
+                <version>36</version>
                 <wantNonLocal>1</wantNonLocal>
                 <debug>0</debug>
                 <option>
@@ -495,13 +495,17 @@
                     <name>OICompilerExtraOption</name>
                     <state>1</state>
                 </option>
+                <option>
+                    <name>CCStackProtection</name>
+                    <state>0</state>
+                </option>
             </data>
         </settings>
         <settings>
             <name>AARM</name>
             <archiveVersion>2</archiveVersion>
             <data>
-                <version>10</version>
+                <version>11</version>
                 <wantNonLocal>1</wantNonLocal>
                 <debug>0</debug>
                 <option>
@@ -656,6 +660,10 @@
                 <option>
                     <name>AsmNoLiteralPool</name>
                     <state>0</state>
+                </option>
+                <option>
+                    <name>PreInclude</name>
+                    <state></state>
                 </option>
             </data>
         </settings>
@@ -1200,7 +1208,7 @@
                 </option>
                 <option>
                     <name>GBECoreSlave</name>
-                    <version>27</version>
+                    <version>28</version>
                     <state>39</state>
                 </option>
                 <option>
@@ -1217,7 +1225,7 @@
                 </option>
                 <option>
                     <name>CoreVariant</name>
-                    <version>27</version>
+                    <version>28</version>
                     <state>39</state>
                 </option>
                 <option>
@@ -1236,7 +1244,7 @@
                 </option>
                 <option>
                     <name>GFPUCoreSlave2</name>
-                    <version>27</version>
+                    <version>28</version>
                     <state>39</state>
                 </option>
                 <option>
@@ -1295,7 +1303,7 @@
             <name>ICCARM</name>
             <archiveVersion>2</archiveVersion>
             <data>
-                <version>35</version>
+                <version>36</version>
                 <wantNonLocal>1</wantNonLocal>
                 <debug>0</debug>
                 <option>
@@ -1554,13 +1562,17 @@
                     <name>OICompilerExtraOption</name>
                     <state>1</state>
                 </option>
+                <option>
+                    <name>CCStackProtection</name>
+                    <state>0</state>
+                </option>
             </data>
         </settings>
         <settings>
             <name>AARM</name>
             <archiveVersion>2</archiveVersion>
             <data>
-                <version>10</version>
+                <version>11</version>
                 <wantNonLocal>1</wantNonLocal>
                 <debug>0</debug>
                 <option>
@@ -1715,6 +1727,10 @@
                 <option>
                     <name>AsmNoLiteralPool</name>
                     <state>0</state>
+                </option>
+                <option>
+                    <name>PreInclude</name>
+                    <state></state>
                 </option>
             </data>
         </settings>
@@ -2141,6 +2157,24 @@
         </settings>
     </configuration>
     <group>
+        <name>bsp</name>
+        <group>
+            <name>ev_hc32a4a8_lqfp176</name>
+            <file>
+                <name>$PROJ_DIR$\..\drivers\bsp\ev_hc32f4a8_lqfp176\ev_hc32a4a8_lqfp176.c</name>
+            </file>
+            <file>
+                <name>$PROJ_DIR$\..\drivers\bsp\ev_hc32f4a8_lqfp176\ev_hc32a4a8_lqfp176_tca9539.c</name>
+            </file>
+        </group>
+        <group>
+            <name>tca9539</name>
+            <file>
+                <name>$PROJ_DIR$\..\drivers\bsp\components\tca9539\tca9539.c</name>
+            </file>
+        </group>
+    </group>
+    <group>
         <name>cmsis</name>
         <file>
             <name>$PROJ_DIR$\startup_hc32a4a8ritj.s</name>
@@ -2318,24 +2352,6 @@
         </file>
     </group>
     <group>
-        <name>bsp</name>
-        <group>
-            <name>tca9539</name>
-            <file>
-                <name>$PROJ_DIR$\..\drivers\bsp\components\tca9539\tca9539.c</name>
-            </file>
-        </group>
-        <group>
-            <name>ev_hc32a4a8_lqfp176</name>
-            <file>
-                <name>$PROJ_DIR$\..\drivers\bsp\ev_hc32f4a8_lqfp176\ev_hc32a4a8_lqfp176.c</name>
-            </file>
-            <file>
-                <name>$PROJ_DIR$\..\drivers\bsp\ev_hc32f4a8_lqfp176\ev_hc32a4a8_lqfp176_tca9539.c</name>
-            </file>
-        </group>
-    </group>
-    <group>
         <name>source</name>
         <group>
             <name>1_App</name>
@@ -2436,10 +2452,16 @@
                 </group>
             </group>
             <group>
-                <name>ModemService</name>
+                <name>ModemPort</name>
                 <file>
-                    <name>$PROJ_DIR$\..\source\3_Bsw\ModemService\ModemService.c</name>
+                    <name>$PROJ_DIR$\..\source\3_Bsw\ModemPort\ModemPort.c</name>
                 </file>
+                <file>
+                    <name>$PROJ_DIR$\..\source\3_Bsw\ModemPort\ModemPort.h</name>
+                </file>
+            </group>
+            <group>
+                <name>ModemService</name>
                 <file>
                     <name>$PROJ_DIR$\..\source\3_Bsw\ModemService\ModemCall.c</name>
                 </file>
@@ -2452,14 +2474,8 @@
                 <file>
                     <name>$PROJ_DIR$\..\source\3_Bsw\ModemService\ModemPlatform.c</name>
                 </file>
-            </group>
-            <group>
-                <name>ModemPort</name>
                 <file>
-                    <name>$PROJ_DIR$\..\source\3_Bsw\ModemPort\ModemPort.c</name>
-                </file>
-                <file>
-                    <name>$PROJ_DIR$\..\source\3_Bsw\ModemPort\ModemPort.h</name>
+                    <name>$PROJ_DIR$\..\source\3_Bsw\ModemService\ModemService.c</name>
                 </file>
             </group>
             <group>
@@ -2582,15 +2598,6 @@
         </group>
         <group>
             <name>6_Library</name>
-            <file>
-                <name>$PROJ_DIR$\..\source\6_Library\Memory.c</name>
-            </file>
-            <file>
-                <name>$PROJ_DIR$\..\source\6_Library\Memory.h</name>
-            </file>
-            <file>
-                <name>$PROJ_DIR$\..\source\6_Library\Types.h</name>
-            </file>
             <group>
                 <name>SeggerRtt</name>
                 <file>
@@ -2603,6 +2610,15 @@
                     <name>$PROJ_DIR$\..\source\6_Library\SeggerRtt\SEGGER_RTT_Conf.h</name>
                 </file>
             </group>
+            <file>
+                <name>$PROJ_DIR$\..\source\6_Library\Memory.c</name>
+            </file>
+            <file>
+                <name>$PROJ_DIR$\..\source\6_Library\Memory.h</name>
+            </file>
+            <file>
+                <name>$PROJ_DIR$\..\source\6_Library\Types.h</name>
+            </file>
         </group>
         <file>
             <name>$PROJ_DIR$\..\source\main.c</name>

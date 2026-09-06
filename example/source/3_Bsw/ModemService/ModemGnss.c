@@ -16,8 +16,9 @@
 
 typedef enum
 {
-    MODEM_GNSS_STEP_POWER_QUERY_QUEUE = 0U,
-    MODEM_GNSS_STEP_POWER_QUERY_WAIT,
+    MODEM_GNSS_STEP_POWER_OFF_QUEUE = 0U,
+    MODEM_GNSS_STEP_POWER_OFF_WAIT,
+    MODEM_GNSS_STEP_POWER_OFF_HOLD,
     MODEM_GNSS_STEP_POWER_ON_QUEUE,
     MODEM_GNSS_STEP_POWER_ON_WAIT,
     MODEM_GNSS_STEP_QUERY_HOLD,
@@ -28,6 +29,7 @@ typedef enum
 typedef struct
 {
     ModemGnssStep_t enStep;
+    uint32_t u32PowerOffMs;
     uint32_t u32QueryHoldMs;
     ModemGnssSample_t stSample;
     uint8_t u8SamplePending;
@@ -235,62 +237,70 @@ static void ModemGnss_EnterQueryHold(void)
 /*******************************************************
   * Name    :ModemGnss_Init
   * Author  :LoH
-  * Function:Initialize GNSS power discovery and sample storage.
+  * Function:Initialize the controlled GNSS power cycle and sample storage.
   * Version :V1.0.0
   * Data    :2026.08.29
 *******************************************************/
 void ModemGnss_Init(void)
 {
     (void)memset(&s_mGnssRun, 0, sizeof(s_mGnssRun));
-    s_mGnssRun.enStep = MODEM_GNSS_STEP_POWER_QUERY_QUEUE;
+    s_mGnssRun.enStep = MODEM_GNSS_STEP_POWER_OFF_QUEUE;
 }
 
 /*******************************************************
   * Name    :ModemGnss_Process
   * Author  :LoH
-  * Function:Drive GNSS power setup and periodic one-shot position queries.
+  * Function:Drive the GNSS power cycle, READY gate and periodic position queries.
   * Version :V1.0.0
   * Data    :2026.08.29
 *******************************************************/
 void ModemGnss_Process(uint8_t u8StartAllowed)
 {
-    const char *pcResponse;
     ModemGnssSample_t stSample;
 
     switch (s_mGnssRun.enStep)
     {
-        case MODEM_GNSS_STEP_POWER_QUERY_QUEUE:
+        case MODEM_GNSS_STEP_POWER_OFF_QUEUE:
             if ((u8StartAllowed != 0U) && (ModemPort_IsIdle() != 0U))
             {
                 ModemPort_ClearTransactionFailure();
-                if (ModemPort_QueueCommand(MODEM_AT_CMD_GNSS_POWER_QUERY, MODEM_AT_RSP_GNSS_POWER,
+                if (ModemPort_QueueCommand(MODEM_AT_CMD_GNSS_POWER_OFF, MODEM_AT_RSP_OK,
                                            MODEM_AT_CFG_GNSS_POWER_TIMEOUT_MS) != 0U)
                 {
-                    s_mGnssRun.enStep = MODEM_GNSS_STEP_POWER_QUERY_WAIT;
+                    s_mGnssRun.enStep = MODEM_GNSS_STEP_POWER_OFF_WAIT;
                 }
             }
             break;
 
-        case MODEM_GNSS_STEP_POWER_QUERY_WAIT:
+        case MODEM_GNSS_STEP_POWER_OFF_WAIT:
             if (ModemPort_HasFailure() != 0U)
             {
                 s_mGnssRun.u8PowerReady = 0U;
+                HMI_LOG_MODEM("GNSS_POWER_OFF_FAILED\r\n");
                 ModemGnss_EnterQueryHold();
             }
             else if (ModemPort_IsIdle() != 0U)
             {
-                pcResponse = ModemPort_GetLastMatchedResponse();
-                s_mGnssRun.u8PowerReady = (strstr(pcResponse, ": 1") != 0) ? 1U : 0U;
-                s_mGnssRun.enStep = (s_mGnssRun.u8PowerReady != 0U)
-                                    ? MODEM_GNSS_STEP_QUERY_HOLD : MODEM_GNSS_STEP_POWER_ON_QUEUE;
-                s_mGnssRun.u32QueryHoldMs = osKernelSysTick() - MODEM_AT_CFG_GNSS_QUERY_PERIOD_MS;
+                s_mGnssRun.u8PowerReady = 0U;
+                s_mGnssRun.u32PowerOffMs = osKernelSysTick();
+                s_mGnssRun.enStep = MODEM_GNSS_STEP_POWER_OFF_HOLD;
+                HMI_LOG_MODEM("GNSS_POWER_OFF\r\n");
+            }
+            break;
+
+        case MODEM_GNSS_STEP_POWER_OFF_HOLD:
+            if ((u8StartAllowed != 0U)
+                && ((osKernelSysTick() - s_mGnssRun.u32PowerOffMs)
+                    >= MODEM_AT_CFG_GNSS_POWER_OFF_HOLD_MS))
+            {
+                s_mGnssRun.enStep = MODEM_GNSS_STEP_POWER_ON_QUEUE;
             }
             break;
 
         case MODEM_GNSS_STEP_POWER_ON_QUEUE:
             if ((u8StartAllowed != 0U) && (ModemPort_IsIdle() != 0U)
                 && (ModemPort_QueueCommand(MODEM_AT_CMD_GNSS_POWER_ON, MODEM_AT_RSP_GNSS_READY,
-                                           MODEM_AT_CFG_GNSS_POWER_TIMEOUT_MS) != 0U))
+                                           MODEM_AT_CFG_GNSS_READY_TIMEOUT_MS) != 0U))
             {
                 s_mGnssRun.enStep = MODEM_GNSS_STEP_POWER_ON_WAIT;
             }
@@ -300,6 +310,7 @@ void ModemGnss_Process(uint8_t u8StartAllowed)
             if (ModemPort_HasFailure() != 0U)
             {
                 s_mGnssRun.u8PowerReady = 0U;
+                HMI_LOG_MODEM("GNSS_POWER_READY_FAILED\r\n");
                 ModemGnss_EnterQueryHold();
             }
             else if (ModemPort_IsIdle() != 0U)
@@ -316,7 +327,7 @@ void ModemGnss_Process(uint8_t u8StartAllowed)
                 && ((osKernelSysTick() - s_mGnssRun.u32QueryHoldMs) >= MODEM_AT_CFG_GNSS_QUERY_PERIOD_MS))
             {
                 s_mGnssRun.enStep = (s_mGnssRun.u8PowerReady != 0U)
-                                    ? MODEM_GNSS_STEP_POSITION_QUEUE : MODEM_GNSS_STEP_POWER_QUERY_QUEUE;
+                                    ? MODEM_GNSS_STEP_POSITION_QUEUE : MODEM_GNSS_STEP_POWER_OFF_QUEUE;
             }
             break;
 
@@ -363,7 +374,7 @@ void ModemGnss_Process(uint8_t u8StartAllowed)
 *******************************************************/
 uint8_t ModemGnss_IsBusy(void)
 {
-    return ((s_mGnssRun.enStep == MODEM_GNSS_STEP_POWER_QUERY_WAIT)
+    return ((s_mGnssRun.enStep == MODEM_GNSS_STEP_POWER_OFF_WAIT)
             || (s_mGnssRun.enStep == MODEM_GNSS_STEP_POWER_ON_WAIT)
             || (s_mGnssRun.enStep == MODEM_GNSS_STEP_POSITION_WAIT)) ? 1U : 0U;
 }
