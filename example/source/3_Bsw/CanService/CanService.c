@@ -3,7 +3,7 @@
   * Author  :LoH
   * Function:CAN2 FD routing, sample eCall input and DBC eCall status output.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 #include "CanService.h"
 #include "Can.h"
@@ -57,7 +57,7 @@ static CanServiceStatus_t s_mCanSvcSts;
   * Author  :LoH
   * Function:Validate the exact sample-only CAN FD+BRS accident frame contract.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 static uint8_t CanService_IsMockEcallFrame(const CanRxFrame_t *pstFrame)
 {
@@ -82,7 +82,7 @@ static uint8_t CanService_IsMockEcallFrame(const CanRxFrame_t *pstFrame)
   * Author  :LoH
   * Function:Cache accident data and latch one crash rising-edge trigger.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 static void CanService_HandleMockEcallFrame(const CanRxFrame_t *pstFrame)
 {
@@ -130,7 +130,7 @@ static void CanService_HandleMockEcallFrame(const CanRxFrame_t *pstFrame)
   * Author  :LoH
   * Function:Drain and route all CAN frames queued by the ISR.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 static void CanService_ProcessRx(void)
 {

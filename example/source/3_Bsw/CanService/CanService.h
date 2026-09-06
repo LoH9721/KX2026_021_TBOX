@@ -3,7 +3,7 @@
   * Author  :LoH
   * Function:Controller-independent CAN FD service interface.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 #ifndef __CAN_SERVICE_H__
 #define __CAN_SERVICE_H__

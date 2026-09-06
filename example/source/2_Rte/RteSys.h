@@ -48,9 +48,23 @@ typedef enum
     RTESYS_SWITCH_KL15,
     RTESYS_SWITCH_NUM
 } RteSysSwitchId_t;
+
+typedef enum
+{
+    RTESYS_OUTPUT_INDICATOR_1 = 0U,
+    RTESYS_OUTPUT_INDICATOR_2,
+    RTESYS_OUTPUT_IG_KEEPON,
+    RTESYS_OUTPUT_PWR_EN_CAN,
+    RTESYS_OUTPUT_CAT4_EN,
+    RTESYS_OUTPUT_CAT4_PWR_KEY,
+    RTESYS_OUTPUT_CAT4_RST,
+    RTESYS_OUTPUT_NUM
+} RteSysOutputId_t;
 /*-------------function port--------------------------*/
 extern void RteSys_SetSwitchState(RteSysSwitchId_t enSwitch, RteSwitchState_t enState);
 extern RteSwitchState_t RteSys_GetSwitchState(RteSysSwitchId_t enSwitch);
+extern void RteSys_SetOutputState(RteSysOutputId_t enOutput, RteSwitchState_t enState);
+extern RteSwitchState_t RteSys_GetOutputState(RteSysOutputId_t enOutput);
 
 #endif
 

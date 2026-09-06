@@ -12,6 +12,7 @@
 #include "ModemGnss.h"
 #include "ModemNetwork.h"
 #include "ModemPlatform.h"
+#include "ModemPower.h"
 #include "ModemPort.h"
 
 #define MODEM_NETWORK_PROCESS_PERIOD_MS     100U
@@ -20,6 +21,7 @@
 typedef struct
 {
     uint8_t u8EmergencyRequestPending;
+    uint8_t u8NetworkOnlineRequested;
     uint8_t u8NetworkSleepRequested;
     uint32_t u32NetworkSleepHoldMs;
 } ModemServiceRuntime_t;
@@ -32,6 +34,8 @@ typedef struct
 
 static ModemServiceRuntime_t s_mSvcRun;
 static ModemServiceStatus_t s_mSvcSts;
+
+static void ModemService_TryStartNetwork(void);
 
 /*******************************************************
   * Name    :ModemService_IsVoiceCallInProgress
@@ -58,10 +62,29 @@ static void ModemService_EnterNetworkSleep(void)
     s_mSvcSts.enServiceState = MODEM_SERVICE_SLEEP;
     ModemNetwork_Reset();
     ModemPlatform_Reset();
+    s_mSvcRun.u8NetworkOnlineRequested = 0U;
 
     if (s_mSvcRun.u8EmergencyRequestPending != 0U)
     {
         s_mSvcSts.enCallState = MODEM_CALL_FAILED;
+    }
+}
+
+/*******************************************************
+  * Name    :ModemService_TryStartNetwork
+  * Author  :LoH
+  * Function:Start the network flow only after the physical modem path is ready for AT traffic.
+  * Version :V1.0.0
+  * Data    :2026.09.06
+*******************************************************/
+static void ModemService_TryStartNetwork(void)
+{
+    if ((s_mSvcRun.u8NetworkOnlineRequested != 0U)
+        && (s_mSvcSts.enServiceState == MODEM_SERVICE_SLEEP)
+        && (ModemPower_IsOnlineReady() != 0U))
+    {
+        ModemNetwork_Start();
+        s_mSvcSts.enServiceState = MODEM_SERVICE_NETWORK_STARTUP;
     }
 }
 
@@ -142,6 +165,7 @@ static void ModemService_ProcessOnlineSleep(void)
         {
             HMI_LOG_MODEM("KL15_OFF_SLEEP\r\n");
             ModemService_EnterNetworkSleep();
+            ModemPower_RequestUartSleep();
             s_mSvcRun.u32NetworkSleepHoldMs = 0U;
         }
     }
@@ -165,6 +189,7 @@ void ModemService_Init(void)
     ModemPlatform_Init();
     ModemCall_Init();
     ModemGnss_Init();
+    ModemPower_Init();
 }
 
 /*******************************************************
@@ -184,16 +209,9 @@ void ModemService_RequestEmergencyCall(const EcallMsd_t *pstMsd)
         ModemCall_Reset();
         ModemPlatform_RequestMsdUpload(pstMsd);
         s_mSvcRun.u8EmergencyRequestPending = 1U;
+        s_mSvcRun.u8NetworkOnlineRequested = 1U;
         s_mSvcRun.u8NetworkSleepRequested = 0U;
-        if (s_mSvcSts.enServiceState == MODEM_SERVICE_SLEEP)
-        {
-            ModemNetwork_Start();
-            s_mSvcSts.enServiceState = MODEM_SERVICE_NETWORK_STARTUP;
-        }
-        else
-        {
-            /* Existing network or platform work continues before MSD upload. */
-        }
+        ModemPower_RequestOnline();
         s_mSvcSts.enCallState = MODEM_CALL_PREPARING;
     }
 }
@@ -209,12 +227,8 @@ void ModemService_RequestNetworkOnline(void)
 {
     s_mSvcRun.u8NetworkSleepRequested = 0U;
     s_mSvcRun.u32NetworkSleepHoldMs = 0U;
-
-    if (s_mSvcSts.enServiceState == MODEM_SERVICE_SLEEP)
-    {
-        ModemNetwork_Start();
-        s_mSvcSts.enServiceState = MODEM_SERVICE_NETWORK_STARTUP;
-    }
+    s_mSvcRun.u8NetworkOnlineRequested = 1U;
+    ModemPower_RequestOnline();
 }
 
 /*******************************************************
@@ -244,6 +258,9 @@ void ModemService_RequestNetworkSleep(void)
 void ModemService_Process(void)
 {
     uint8_t u8PlatformWasOnline;
+
+    ModemPower_Process();
+    ModemService_TryStartNetwork();
 
     if (ModemGnss_IsBusy() != 0U)
     {

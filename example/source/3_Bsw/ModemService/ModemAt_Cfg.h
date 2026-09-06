@@ -30,6 +30,7 @@
 #define MODEM_AT_CMD_GNSS_POWER_OFF              "AT+CGNSSPWR=0\r\n"
 #define MODEM_AT_CMD_GNSS_POWER_ON               "AT+CGNSSPWR=1,0,1\r\n"
 #define MODEM_AT_CMD_GNSS_POSITION               "AT+CGPSINFO\r\n"
+#define MODEM_AT_CMD_UART_SLEEP_RX               "AT+CSCLK=2\r\n"
 
 /* Dynamic commands must be assembled with snprintf and these format macros. */
 #define MODEM_AT_CMD_DIAL_FORMAT                "ATD%s;\r\n"
@@ -89,6 +90,7 @@
 #define MODEM_AT_CFG_GNSS_POWER_OFF_HOLD_MS        1000U
 #define MODEM_AT_CFG_GNSS_POSITION_TIMEOUT_MS     2000U
 #define MODEM_AT_CFG_GNSS_QUERY_PERIOD_MS         1000U
+#define MODEM_AT_CFG_UART_SLEEP_TIMEOUT_MS        2000U
 #define MODEM_AT_CFG_VOICE_RETRY_ENABLED              0U
 #define MODEM_AT_CFG_VOICE_RETRY_FIRST_MS        10000U
 #define MODEM_AT_CFG_VOICE_RETRY_SECOND_MS       30000U

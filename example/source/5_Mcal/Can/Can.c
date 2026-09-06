@@ -1,22 +1,22 @@
 /*******************************************************
   * Name    :Can.c
   * Author  :LoH
-  * Function:HC32 CAN2 CAN FD driver, PHY control and ISR receive ring.
+  * Function:HC32 CAN2 CAN FD driver, TJA1044 control and ISR receive ring.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 /*-------------include file---------------------------*/
 #include "Can_Cfg.h"
 #include "Can.h"
-#include "ev_hc32a4a8_lqfp176_tca9539.h"
+#include "Gpio.h"
 #include <string.h>
+
 /*-------------variable statement---------------------*/
 typedef struct
 {
     CanRxFrame_t astRxRing[CAN_CFG_RX_RING_SIZE];
     volatile uint8_t u8WriteSequence;
     volatile uint8_t u8ReadSequence;
-    uint8_t u8IoExpanderInitialized;
 } CanRuntime_t;
 
 typedef struct
@@ -29,41 +29,54 @@ typedef struct
 
 static CanRuntime_t s_mCanRun;
 static CanStatus_t s_mCanSts;
+
 /*-------------function-------------------------------*/
 /*******************************************************
   * Name    :Can_EnablePhy
   * Author  :LoH
-  * Function:Initialize TCA9539 once and drive CAN2_STB low for normal mode.
+  * Function:Enable CAN2 power and set the TJA1044 to normal mode.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 static void Can_EnablePhy(void)
 {
-    if (s_mCanRun.u8IoExpanderInitialized == 0U)
-    {
-        BSP_IO_Init();
-        BSP_IO_WritePortPin(CAN2_STB_PORT, CAN2_STB_PIN, EIO_PIN_SET);
-        BSP_IO_ConfigPortPin(CAN2_STB_PORT, CAN2_STB_PIN, EIO_DIR_OUT);
-        s_mCanRun.u8IoExpanderInitialized = 1U;
-    }
-    BSP_IO_WritePortPin(CAN2_STB_PORT, CAN2_STB_PIN, EIO_PIN_RESET);
+    GPIO_SetOutputLevel(E_OUTPUT_PWR_EN_CAN, HIGH);
+    GPIO_SetOutputLevel(E_OUTPUT_CAN1_STB, LOW);
+}
+
+/*******************************************************
+  * Name    :Can_DisablePhy
+  * Author  :LoH
+  * Function:Set the TJA1044 to standby mode.
+  * Version :V1.0.0
+  * Data    :2026.09.06
+*******************************************************/
+static void Can_DisablePhy(void)
+{
+    GPIO_SetOutputLevel(E_OUTPUT_CAN1_STB, HIGH);
 }
 
 /*******************************************************
   * Name    :Can_DlcToLength
   * Author  :LoH
-  * Function:Convert a CAN data-length code to payload bytes.
+  * Function:Convert a CAN data length code to payload bytes.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 static uint8_t Can_DlcToLength(uint8_t u8Dlc)
 {
-    static const uint8_t au8DlcLength[16] = {
+    static const uint8_t au8DlcLength[16] =
+    {
         0U, 1U, 2U, 3U, 4U, 5U, 6U, 7U,
         8U, 12U, 16U, 20U, 24U, 32U, 48U, 64U
     };
 
-    return (u8Dlc < 16U) ? au8DlcLength[u8Dlc] : 0U;
+    if (u8Dlc >= 16U)
+    {
+        return 0U;
+    }
+
+    return au8DlcLength[u8Dlc];
 }
 
 /*******************************************************
@@ -71,7 +84,7 @@ static uint8_t Can_DlcToLength(uint8_t u8Dlc)
   * Author  :LoH
   * Function:Convert an exact supported payload length to a CAN DLC.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 static uint8_t Can_LengthToDlc(uint8_t u8Length, uint8_t *pu8Dlc)
 {
@@ -112,15 +125,16 @@ static uint8_t Can_LengthToDlc(uint8_t u8Length, uint8_t *pu8Dlc)
         default:
             return 0U;
     }
+
     return 1U;
 }
 
 /*******************************************************
   * Name    :Can_PushRxFrameFromIsr
   * Author  :LoH
-  * Function:Publish one hardware frame to the ISR-owned ring buffer.
+  * Function:Publish one hardware frame to the ISR-owned receive ring.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 static void Can_PushRxFrameFromIsr(const stc_can_rx_frame_t *pstcHwFrame)
 {
@@ -151,6 +165,7 @@ static void Can_PushRxFrameFromIsr(const stc_can_rx_frame_t *pstcHwFrame)
     {
         (void)memcpy(pstFrame->au8Data, pstcHwFrame->au8Data, u8Length);
     }
+
     __DMB();
     s_mCanRun.u8WriteSequence = (uint8_t)(u8WriteSequence + 1U);
 }
@@ -158,9 +173,9 @@ static void Can_PushRxFrameFromIsr(const stc_can_rx_frame_t *pstcHwFrame)
 /*******************************************************
   * Name    :Can_DrainRxFromIsr
   * Author  :LoH
-  * Function:Drain a bounded number of hardware RX frames into the ring.
+  * Function:Drain a bounded number of CAN2 receive frames in interrupt context.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 static void Can_DrainRxFromIsr(void)
 {
@@ -178,9 +193,9 @@ static void Can_DrainRxFromIsr(void)
 /*******************************************************
   * Name    :Can_IrqCallback
   * Author  :LoH
-  * Function:Latch CAN errors and transfer RX frames without business work.
+  * Function:Handle CAN2 receive, bus-off and transmit error status.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 static void Can_IrqCallback(void)
 {
@@ -203,8 +218,8 @@ static void Can_IrqCallback(void)
     {
         s_mCanSts.u32RxOverflowCount++;
     }
-    if ((u32Status & CAN_FLAG_PTB_TX) == 0U
-        && (u32Status & (CAN_FLAG_TX_ABORTED | CAN_FLAG_BUS_ERR)) != 0U)
+    if (((u32Status & CAN_FLAG_PTB_TX) == 0U)
+        && ((u32Status & (CAN_FLAG_TX_ABORTED | CAN_FLAG_BUS_ERR)) != 0U))
     {
         s_mCanSts.u32TxErrorCount++;
     }
@@ -217,30 +232,27 @@ static void Can_IrqCallback(void)
 /*******************************************************
   * Name    :Can_Init
   * Author  :LoH
-  * Function:Initialize CAN2 and its PHY for standard-ID 500K/2M CAN FD+BRS traffic.
+  * Function:Initialize CAN2, PE2/PE3 pins and the TJA1044 PHY for 500K/2M CAN FD.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 void Can_Init(void)
 {
     stc_can_init_t stcCanInit;
     stc_canfd_config_t stcCanFd;
     stc_irq_signin_config_t stcIrq;
-    stc_can_filter_config_t astcFilter[1] = {
+    stc_can_filter_config_t astcFilter[1] =
+    {
         {CAN_CFG_RX_MOCK_ECALL_ID, 0x00U, CAN_ID_STD}
     };
 
-    uint8_t u8IoExpanderInitialized;
-
-    u8IoExpanderInitialized = s_mCanRun.u8IoExpanderInitialized;
     (void)memset(&s_mCanRun, 0, sizeof(s_mCanRun));
-    s_mCanRun.u8IoExpanderInitialized = u8IoExpanderInitialized;
     (void)memset(&s_mCanSts, 0, sizeof(s_mCanSts));
 
     LL_PERIPH_WRITE_ENABLE();
     CLK_SetCANClockSrc(CLK_CAN2, CLK_CANCLK_SYSCLK_DIV5);
-    GPIO_SetFunc(GPIO_PORT_G, GPIO_PIN_09, GPIO_FUNC_62);
-    GPIO_SetFunc(GPIO_PORT_I, GPIO_PIN_03, GPIO_FUNC_63);
+    GPIO_SetFunc(GPIO_PORT_E, GPIO_PIN_02, GPIO_FUNC_62);
+    GPIO_SetFunc(GPIO_PORT_E, GPIO_PIN_03, GPIO_FUNC_63);
     Can_EnablePhy();
 
     (void)CAN_StructInit(&stcCanInit);
@@ -283,9 +295,9 @@ void Can_Init(void)
 /*******************************************************
   * Name    :Net_Can_DeInit
   * Author  :LoH
-  * Function:Put the CAN2 PHY in standby and disable its controller and clock.
+  * Function:Stop CAN2 and set the TJA1044 to standby mode.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 void Net_Can_DeInit(void)
 {
@@ -294,7 +306,7 @@ void Net_Can_DeInit(void)
     CAN_IntCmd(CM_CAN2, CAN_INT_ALL, DISABLE);
     CAN_DeInit(CM_CAN2);
     FCG_Fcg1PeriphClockCmd(FCG1_PERIPH_CAN2, DISABLE);
-    BSP_IO_WritePortPin(CAN2_STB_PORT, CAN2_STB_PIN, EIO_PIN_SET);
+    Can_DisablePhy();
     LL_PERIPH_WRITE_DISABLE();
 }
 
@@ -303,7 +315,7 @@ void Net_Can_DeInit(void)
   * Author  :LoH
   * Function:Use the normal CAN2 shutdown path before low power.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 void LowPower_Can_DeInit(void)
 {
@@ -313,9 +325,9 @@ void LowPower_Can_DeInit(void)
 /*******************************************************
   * Name    :Can_TakeRxFrame
   * Author  :LoH
-  * Function:Copy one complete frame from the ISR ring in task context.
+  * Function:Copy one complete frame from the ISR receive ring.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 uint8_t Can_TakeRxFrame(CanRxFrame_t *pstFrame)
 {
@@ -342,9 +354,9 @@ uint8_t Can_TakeRxFrame(CanRxFrame_t *pstFrame)
 /*******************************************************
   * Name    :Can_TxMsg
   * Author  :LoH
-  * Function:Validate and send one classic CAN or CAN FD+BRS frame by PTB.
+  * Function:Validate and send one standard classic CAN or CAN FD+BRS frame by PTB.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 Bool Can_TxMsg(Frame_Type enFrame, uint32_t u32Id, const uint8_t *pu8Data, uint8_t u8Length)
 {
@@ -375,6 +387,7 @@ Bool Can_TxMsg(Frame_Type enFrame, uint32_t u32Id, const uint8_t *pu8Data, uint8
         s_mCanSts.u32TxErrorCount++;
         return FALSE;
     }
+
     CAN_StartTx(CM_CAN2, CAN_TX_REQ_PTB);
     return TRUE;
 }
@@ -384,7 +397,7 @@ Bool Can_TxMsg(Frame_Type enFrame, uint32_t u32Id, const uint8_t *pu8Data, uint8
   * Author  :LoH
   * Function:Return whether CAN2 has entered bus-off since initialization.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 uint8_t Can_GetBusOffFlag(void)
 {
@@ -394,9 +407,9 @@ uint8_t Can_GetBusOffFlag(void)
 /*******************************************************
   * Name    :Can_GetBusOffCount
   * Author  :LoH
-  * Function:Return the accumulated CAN2 bus-off interrupt count.
+  * Function:Return the accumulated CAN2 bus-off count.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 uint32_t Can_GetBusOffCount(void)
 {
@@ -406,9 +419,9 @@ uint32_t Can_GetBusOffCount(void)
 /*******************************************************
   * Name    :Can_GetRxOverflowCount
   * Author  :LoH
-  * Function:Return hardware and software RX overflow events.
+  * Function:Return receive ring overflow events.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 uint32_t Can_GetRxOverflowCount(void)
 {
@@ -418,9 +431,9 @@ uint32_t Can_GetRxOverflowCount(void)
 /*******************************************************
   * Name    :Can_GetTxErrorCount
   * Author  :LoH
-  * Function:Return rejected or aborted CAN transmissions.
+  * Function:Return recorded CAN2 error events.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 uint32_t Can_GetTxErrorCount(void)
 {

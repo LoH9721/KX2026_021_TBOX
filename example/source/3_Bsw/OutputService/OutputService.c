@@ -7,6 +7,7 @@
 *******************************************************/
 #include "Gpio.h"
 #include "OutputService.h"
+#include "RteSys.h"
 #include <string.h>
 
 #define OUTPUT_SERVICE_PERIOD_MS              10U
@@ -15,6 +16,7 @@
 typedef struct
 {
     E_GPIO_OUTPUT_INDEX enGpioOutput;
+    RteSysOutputId_t enRteOutput;
     IO_Type enActiveLevel;
     IO_Type enInitialState;
 } OutputServiceChannelConfig_t;
@@ -27,14 +29,47 @@ typedef struct
 
 static const OutputServiceChannelConfig_t s_astOutputServiceChannelConfig[OUTPUT_SERVICE_SIG_NUM] =
 {
-    {E_OUTPUT_INDICATOR_1, HIGH, LOW},
-    {E_OUTPUT_INDICATOR_2, HIGH, LOW},
-    {E_OUTPUT_IG_KEEPON, HIGH, HIGH},
-    {E_OUTPUT_PWR_EN_CAN, HIGH, HIGH},
-    {E_OUTPUT_CAT4_EN, HIGH, HIGH}
+    {E_OUTPUT_INDICATOR_1, RTESYS_OUTPUT_INDICATOR_1, HIGH, LOW},
+    {E_OUTPUT_INDICATOR_2, RTESYS_OUTPUT_INDICATOR_2, HIGH, LOW},
+    {E_OUTPUT_IG_KEEPON, RTESYS_OUTPUT_IG_KEEPON, HIGH, HIGH},
+    {E_OUTPUT_PWR_EN_CAN, RTESYS_OUTPUT_PWR_EN_CAN, HIGH, HIGH},
+    {E_OUTPUT_CAT4_EN, RTESYS_OUTPUT_CAT4_EN, HIGH, HIGH},
+    {E_OUTPUT_CAT4_PWR_KEY, RTESYS_OUTPUT_CAT4_PWR_KEY, LOW, LOW},
+    {E_OUTPUT_CAT4_RST, RTESYS_OUTPUT_CAT4_RST, LOW, LOW}
 };
 
 static OutputServiceRuntime_t s_mOutputRun;
+
+/*******************************************************
+  * Name    :OutputService_ApplyRteRequests
+  * Author  :LoH
+  * Function:Apply all RTE output requests to physical GPIO levels.
+  * Version :V1.0.0
+  * Data    :2026.09.06
+*******************************************************/
+static void OutputService_ApplyRteRequests(void)
+{
+    uint8_t u8Index;
+    IO_Type enOutputLevel;
+
+    for (u8Index = 0U; u8Index < OUTPUT_SERVICE_SIG_NUM; u8Index++)
+    {
+        if (RteSys_GetOutputState(s_astOutputServiceChannelConfig[u8Index].enRteOutput)
+            == RTE_SWITCH_ACTIVE)
+        {
+            enOutputLevel = s_astOutputServiceChannelConfig[u8Index].enActiveLevel;
+        }
+        else if (s_astOutputServiceChannelConfig[u8Index].enActiveLevel == HIGH)
+        {
+            enOutputLevel = LOW;
+        }
+        else
+        {
+            enOutputLevel = HIGH;
+        }
+        GPIO_SetOutputLevel(s_astOutputServiceChannelConfig[u8Index].enGpioOutput, enOutputLevel);
+    }
+}
 
 /*******************************************************
   * Name    :OutputService_Init
@@ -50,9 +85,11 @@ void OutputService_Init(void)
     (void)memset(&s_mOutputRun, 0, sizeof(s_mOutputRun));
     for (u8Index = 0U; u8Index < OUTPUT_SERVICE_SIG_NUM; u8Index++)
     {
-        OutputService_SetState((OutputServiceSignal_t)u8Index,
-                               s_astOutputServiceChannelConfig[u8Index].enInitialState);
+        RteSys_SetOutputState(s_astOutputServiceChannelConfig[u8Index].enRteOutput,
+                              (s_astOutputServiceChannelConfig[u8Index].enInitialState == HIGH)
+                              ? RTE_SWITCH_ACTIVE : RTE_SWITCH_INACTIVE);
     }
+    OutputService_ApplyRteRequests();
 }
 
 /*******************************************************
@@ -76,6 +113,7 @@ void OutputService_Process10ms(void)
         OutputService_SetState(OUTPUT_SERVICE_SIG_INDICATOR_1, s_mOutputRun.enIndicatorState);
         OutputService_SetState(OUTPUT_SERVICE_SIG_INDICATOR_2, s_mOutputRun.enIndicatorState);
     }
+    OutputService_ApplyRteRequests();
 }
 
 /*******************************************************
@@ -87,23 +125,10 @@ void OutputService_Process10ms(void)
 *******************************************************/
 void OutputService_SetState(OutputServiceSignal_t enSignal, IO_Type enState)
 {
-    IO_Type enOutputLevel;
-
     if (enSignal < OUTPUT_SERVICE_SIG_NUM)
     {
-        if (enState == HIGH)
-        {
-            enOutputLevel = s_astOutputServiceChannelConfig[enSignal].enActiveLevel;
-        }
-        else if (s_astOutputServiceChannelConfig[enSignal].enActiveLevel == HIGH)
-        {
-            enOutputLevel = LOW;
-        }
-        else
-        {
-            enOutputLevel = HIGH;
-        }
-        GPIO_SetOutputLevel(s_astOutputServiceChannelConfig[enSignal].enGpioOutput, enOutputLevel);
+        RteSys_SetOutputState(s_astOutputServiceChannelConfig[enSignal].enRteOutput,
+                              (enState == HIGH) ? RTE_SWITCH_ACTIVE : RTE_SWITCH_INACTIVE);
     }
 }
 

@@ -3,7 +3,7 @@
   * Author  :LoH
   * Function:HC32 CAN2 CAN FD compile-time configuration.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.09.06
 *******************************************************/
 #ifndef _CAN_CFG_H_
 #define _CAN_CFG_H_
@@ -16,11 +16,11 @@
 
 #define CAN_CFG_RX_MOCK_ECALL_ID          0x126U
 
-/* 40 MHz CAN clock: 80 TQ gives 500 kbit/s with an 80% sample point. */
-#define CAN_CFG_NOMINAL_PRESCALER         1U
-#define CAN_CFG_NOMINAL_TIME_SEG1         64U
-#define CAN_CFG_NOMINAL_TIME_SEG2         16U
-#define CAN_CFG_NOMINAL_SJW               16U
+/* 40 MHz CAN clock: 20 TQ gives 500 kbit/s with an 80% sample point. */
+#define CAN_CFG_NOMINAL_PRESCALER         4U
+#define CAN_CFG_NOMINAL_TIME_SEG1         16U
+#define CAN_CFG_NOMINAL_TIME_SEG2         4U
+#define CAN_CFG_NOMINAL_SJW               2U
 
 /* 40 MHz CAN clock: 20 TQ gives 2 Mbit/s with an 80% sample point. */
 #define CAN_CFG_DATA_PRESCALER            1U
