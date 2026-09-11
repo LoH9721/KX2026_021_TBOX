@@ -118,6 +118,11 @@ void GpioScanTask(void)
 *******************************************************/
 IO_Type GPIO_GetOutputLevel(E_GPIO_OUTPUT_INDEX index)
 {
+    if (index >= E_OUTPUT_GPIO_NUM)
+    {
+        return LOW;
+    }
+
     return (IO_Type)GPIO_ReadOutputPins(g_astGpioOutputConfig[index].u8Port,
                                          g_astGpioOutputConfig[index].u16Pin);
 }

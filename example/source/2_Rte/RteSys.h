@@ -58,6 +58,10 @@ typedef enum
     RTESYS_OUTPUT_CAT4_EN,
     RTESYS_OUTPUT_CAT4_PWR_KEY,
     RTESYS_OUTPUT_CAT4_RST,
+    RTESYS_OUTPUT_PWR_EN_GNSS,
+    RTESYS_OUTPUT_PWR_EN_3V3,
+    RTESYS_OUTPUT_PWR_EN_PHY,
+    RTESYS_OUTPUT_PWR_EN_AUDIO,
     RTESYS_OUTPUT_NUM
 } RteSysOutputId_t;
 /*-------------function port--------------------------*/
