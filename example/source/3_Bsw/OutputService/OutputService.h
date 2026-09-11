@@ -29,6 +29,10 @@ typedef enum
 void OutputService_Init(void);
 void OutputService_Process10ms(void);
 void OutputService_SetState(OutputServiceSignal_t enSignal, IO_Type enState);
+/* Set indicator 1 according to GNSS initialization status. */
+void OutputService_SetGnssReady(uint8_t u8Ready);
+/* Set indicator 2 according to voice call availability status. */
+void OutputService_SetVoiceCallReady(uint8_t u8Ready);
 void OutputService_SetEcallCancelWindow(uint8_t u8Active);
 
 #endif

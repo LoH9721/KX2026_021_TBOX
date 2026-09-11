@@ -13,6 +13,7 @@
 #include "Hmi.h"
 #include "ModemAt_Cfg.h"
 #include "ModemPort.h"
+#include "OutputService.h"
 
 typedef enum
 {
@@ -245,6 +246,7 @@ void ModemGnss_Init(void)
 {
     (void)memset(&s_mGnssRun, 0, sizeof(s_mGnssRun));
     s_mGnssRun.enStep = MODEM_GNSS_STEP_POWER_OFF_QUEUE;
+    OutputService_SetGnssReady(0U);
 }
 
 /*******************************************************
@@ -276,12 +278,14 @@ void ModemGnss_Process(uint8_t u8StartAllowed)
             if (ModemPort_HasFailure() != 0U)
             {
                 s_mGnssRun.u8PowerReady = 0U;
+                OutputService_SetGnssReady(0U);
                 HMI_LOG_MODEM("GNSS_POWER_OFF_FAILED\r\n");
                 ModemGnss_EnterQueryHold();
             }
             else if (ModemPort_IsIdle() != 0U)
             {
                 s_mGnssRun.u8PowerReady = 0U;
+                OutputService_SetGnssReady(0U);
                 s_mGnssRun.u32PowerOffMs = osKernelSysTick();
                 s_mGnssRun.enStep = MODEM_GNSS_STEP_POWER_OFF_HOLD;
                 HMI_LOG_MODEM("GNSS_POWER_OFF\r\n");
@@ -310,6 +314,7 @@ void ModemGnss_Process(uint8_t u8StartAllowed)
             if (ModemPort_HasFailure() != 0U)
             {
                 s_mGnssRun.u8PowerReady = 0U;
+                OutputService_SetGnssReady(0U);
                 HMI_LOG_MODEM("GNSS_POWER_READY_FAILED\r\n");
                 ModemGnss_EnterQueryHold();
             }
@@ -317,6 +322,7 @@ void ModemGnss_Process(uint8_t u8StartAllowed)
             {
                 s_mGnssRun.u32QueryHoldMs = osKernelSysTick();
                 s_mGnssRun.u8PowerReady = 1U;
+                OutputService_SetGnssReady(1U);
                 s_mGnssRun.enStep = MODEM_GNSS_STEP_QUERY_HOLD;
                 HMI_LOG_MODEM("GNSS_POWER_READY\r\n");
             }

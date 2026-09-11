@@ -12,7 +12,7 @@
 
 /* Set to 0U to remove the corresponding log calls at compile time. */
 #define HMI_LOG_ECALL_ENABLE          1U
-#define HMI_LOG_CAN_ENABLE            1U
+#define HMI_LOG_CAN_ENABLE            0U
 #define HMI_LOG_MODEM_ENABLE          1U
 #define HMI_LOG_GNSS_ENABLE           0U
 #define HMI_LOG_MONITOR_ENABLE        0U
