@@ -8,6 +8,7 @@
 #include "cmsis_os.h"
 #include "Hmi.h"
 #include "InputService.h"
+#include "OutputService.h"
 #include "RteSys.h"
 #include "TaskManager.h"
 
@@ -38,7 +39,8 @@ static void AppTask_Entry(void const *argument)
     {
         Hmi_Process();
         InputService_Process10ms();
-        enCurrentSosState = (RteSwitchState_t)RteSys_GetU8Sig(RTESYS_U8_SOS_SWITCH_STATE);
+        OutputService_Process10ms();
+        enCurrentSosState = RteSys_GetSwitchState(RTESYS_SWITCH_SOS);
         enEcallState = Ecall_GetState();
 
         if (enEcallState == ECALL_STATE_STANDBY)
@@ -46,7 +48,7 @@ static void AppTask_Entry(void const *argument)
             u16SosCancelHoldMs = 0U;
             u8ManualCancelArmed = 0U;
 
-            if (enCurrentSosState == RTE_SWITCH_RELEASED)
+            if (enCurrentSosState == RTE_SWITCH_INACTIVE)
             {
                 u16SosTriggerHoldMs = 0U;
                 u8ManualTriggerSent = 0U;
@@ -74,7 +76,7 @@ static void AppTask_Entry(void const *argument)
         {
             u16SosTriggerHoldMs = 0U;
 
-            if (enCurrentSosState == RTE_SWITCH_RELEASED)
+            if (enCurrentSosState == RTE_SWITCH_INACTIVE)
             {
                 u8ManualCancelArmed = 1U;
                 u16SosCancelHoldMs = 0U;

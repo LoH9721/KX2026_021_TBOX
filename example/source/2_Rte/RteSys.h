@@ -36,25 +36,39 @@ typedef enum
 
 typedef enum
 {
-    RTE_SWITCH_RELEASED = 0U,
-    RTE_SWITCH_PRESSED
+    RTE_SWITCH_INACTIVE = 0U,
+    RTE_SWITCH_ACTIVE
 } RteSwitchState_t;
 
 typedef enum
 {
-    RTE_KL15_OFF = 0U,
-    RTE_KL15_ON
-} RteKl15State_t;
+    RTESYS_SWITCH_SOS = 0U,
+    RTESYS_SWITCH_SRS,
+    RTESYS_SWITCH_PBATTERY_SRS,
+    RTESYS_SWITCH_KL15,
+    RTESYS_SWITCH_NUM
+} RteSysSwitchId_t;
 
 typedef enum
 {
-    RTESYS_U8_SOS_SWITCH_STATE = 0U,
-    RTESYS_U8_KL15_STATE,
-    RTESYS_U8_TYPE_MAX
-} RteSys_U8_Type;
+    RTESYS_OUTPUT_INDICATOR_1 = 0U,
+    RTESYS_OUTPUT_INDICATOR_2,
+    RTESYS_OUTPUT_IG_KEEPON,
+    RTESYS_OUTPUT_PWR_EN_CAN,
+    RTESYS_OUTPUT_CAT4_EN,
+    RTESYS_OUTPUT_CAT4_PWR_KEY,
+    RTESYS_OUTPUT_CAT4_RST,
+    RTESYS_OUTPUT_PWR_EN_GNSS,
+    RTESYS_OUTPUT_PWR_EN_3V3,
+    RTESYS_OUTPUT_PWR_EN_PHY,
+    RTESYS_OUTPUT_PWR_EN_AUDIO,
+    RTESYS_OUTPUT_NUM
+} RteSysOutputId_t;
 /*-------------function port--------------------------*/
-extern void    RteSys_SetU8Sig(RteSys_U8_Type id, uint8_t sig);
-extern uint8_t RteSys_GetU8Sig(RteSys_U8_Type id);
+extern void RteSys_SetSwitchState(RteSysSwitchId_t enSwitch, RteSwitchState_t enState);
+extern RteSwitchState_t RteSys_GetSwitchState(RteSysSwitchId_t enSwitch);
+extern void RteSys_SetOutputState(RteSysOutputId_t enOutput, RteSwitchState_t enState);
+extern RteSwitchState_t RteSys_GetOutputState(RteSysOutputId_t enOutput);
 
 #endif
 

@@ -21,7 +21,7 @@
 /*******************************************************************************
  * Include files
  ******************************************************************************/
-#include "hc32a4a8ritj.h"
+#include "hc32a4a8.h"
 //#include "hc32_ll.h"
 //#include "ev_hc32a4a8_lqfp176_bsp.h"
 //#include <string.h>
@@ -29,6 +29,10 @@
 #include "Gpio.h"
 #include "cmsis_os.h"
 #include "TaskManager.h"
+//#include "CDD_System.h"
+// #include "Mcu.h"
+// #include "Port.h"
+
 /*******************************************************************************
  * Local type definitions ('typedef')
  ******************************************************************************/
@@ -38,6 +42,8 @@
  ******************************************************************************/
 #define EXAMPLE_PERIPH_WE               (LL_PERIPH_GPIO | LL_PERIPH_EFM | LL_PERIPH_FCG | \
                                          LL_PERIPH_PWC_CLK_RMU | LL_PERIPH_SRAM)
+
+
 /*******************************************************************************
  * Global variable definitions (declared in header file with 'extern')
  ******************************************************************************/
@@ -59,20 +65,6 @@
 
     __DSB();  /* Arm Errata 838869 */
 }
-void Thread1Handle(void const *argument)
-{
-    for (;;) {
-      GPIO_SetOutPutTogglePin(E_OUTPUT_LED1);
-        osDelay(500);
-    }
-}
-void Thread2Handle(void const *argument)
-{
-    for (;;) {
-      GPIO_SetOutPutTogglePin(E_OUTPUT_LED2);
-        osDelay(200);
-    }
-}
 /**
  * @brief  Main function of template project
  * @param  None
@@ -86,13 +78,13 @@ int32_t main(void)
     LL_PERIPH_WE(0xff);
     Uart_Init();
     (void)SysTick_Init(1000U);
-    osThreadDef(Thread1, Thread1Handle, osPriorityLow, 0, configMINIMAL_STACK_SIZE * 5);
-    osThreadCreate(osThread(Thread1), NULL);
-    // osThreadDef(Thread2, Thread2Handle, osPriorityLow, 0, configMINIMAL_STACK_SIZE * 5);
-    // osThreadCreate(osThread(Thread2), NULL);
+
     TaskManager_Start();
+    
     osKernelStart();
-    while (1) {
+    while (1) 
+    {
+
     }
 }
 

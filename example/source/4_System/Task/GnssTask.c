@@ -10,6 +10,7 @@
 #include "GnssService.h"
 #include "Hmi.h"
 #include "TaskManager.h"
+#include "TimeService.h"
 
 /*******************************************************
   * Name    :GnssTask_Entry
@@ -28,6 +29,7 @@ static void GnssTask_Entry(void const *argument)
     for (;;)
     {
         GnssService_Process();
+        TimeService_Process();
 
         if ((Ecall_GetState() == ECALL_STATE_WAIT_GNSS) && (u8RequestReported == 0U))
         {

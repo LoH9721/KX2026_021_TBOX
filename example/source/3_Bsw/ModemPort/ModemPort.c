@@ -22,6 +22,7 @@ typedef struct
     const char *pcCommand;
     const char *pcExpected;
     uint32_t u32TimeoutMs;
+    uint8_t u8LogEnabled;
 } ModemPortCommand_t;
 
 typedef struct
@@ -33,6 +34,7 @@ typedef struct
     uint8_t u8WriteIndex;
     uint8_t u8Count;
     uint8_t u8Active;
+    uint8_t u8SuppressTrailingOk;
     uint16_t u16LineLength;
     uint32_t u32StartMs;
 } ModemPortRuntime_t;
@@ -190,6 +192,36 @@ static uint8_t ModemPort_Contains(const char *pcText, const char *pcToken)
 }
 
 /*******************************************************
+  * Name    :ModemPort_ShouldLogResponseLine
+  * Author  :LoH
+  * Function:Keep silent-command success replies quiet while retaining diagnostics and URCs.
+  * Version :V1.0.0
+  * Data    :2026.09.13
+*******************************************************/
+static uint8_t ModemPort_ShouldLogResponseLine(const char *pcLine)
+{
+    if ((m_stModemPortRuntime.u8SuppressTrailingOk != 0U)
+        && (strcmp(pcLine, "OK") == 0))
+    {
+        return 0U;
+    }
+
+    if ((m_stModemPortRuntime.u8Active == 0U)
+        || (m_stModemPortRuntime.stActiveCommand.u8LogEnabled != 0U))
+    {
+        return 1U;
+    }
+
+    if ((ModemPort_Contains(pcLine, m_stModemPortRuntime.stActiveCommand.pcExpected) != 0U)
+        || (ModemPort_Contains(pcLine, "OK") != 0U))
+    {
+        return 0U;
+    }
+
+    return 1U;
+}
+
+/*******************************************************
   * Name    :ModemPort_FinishActiveCommand
   * Author  :LoH
   * Function:Finish the active AT command with one result.
@@ -244,7 +276,10 @@ static void ModemPort_StartNextCommand(void)
         ModemPort_FinishActiveCommand(MODEM_PORT_RESULT_ERROR);
         return;
     }
-    Hmi_LogWithPrefix("  [MODEM TX] ", m_stModemPortRuntime.stActiveCommand.pcCommand);
+    if (m_stModemPortRuntime.stActiveCommand.u8LogEnabled != 0U)
+    {
+        Hmi_LogWithPrefix("  [MODEM TX] ", m_stModemPortRuntime.stActiveCommand.pcCommand);
+    }
     m_stModemPortRuntime.u32StartMs = osKernelSysTick();
     m_stModemPortRuntime.u8Active = 1U;
 }
@@ -263,7 +298,17 @@ static void ModemPort_HandleResponseLine(const char *pcLine)
     unsigned int u32CallDirection;
     unsigned int u32CallStatus;
 
-    ModemPort_LogResponseLine(pcLine);
+    if (ModemPort_ShouldLogResponseLine(pcLine) != 0U)
+    {
+        ModemPort_LogResponseLine(pcLine);
+    }
+
+    if ((m_stModemPortRuntime.u8SuppressTrailingOk != 0U)
+        && (strcmp(pcLine, "OK") == 0))
+    {
+        m_stModemPortRuntime.u8SuppressTrailingOk = 0U;
+        return;
+    }
 
     if ((ModemPort_Contains(pcLine, "+CGEV:") != 0U)
         && (ModemPort_Contains(pcLine, "PDN DEACT") != 0U))
@@ -343,6 +388,11 @@ static void ModemPort_HandleResponseLine(const char *pcLine)
     if (ModemPort_Contains(pcLine, m_stModemPortRuntime.stActiveCommand.pcExpected) != 0U)
     {
         ModemPort_CopyMatchedResponse(pcLine);
+        if ((m_stModemPortRuntime.stActiveCommand.u8LogEnabled == 0U)
+            && (strcmp(m_stModemPortRuntime.stActiveCommand.pcExpected, "OK") != 0))
+        {
+            m_stModemPortRuntime.u8SuppressTrailingOk = 1U;
+        }
         ModemPort_FinishActiveCommand(MODEM_PORT_RESULT_OK);
     }
     else if ((ModemPort_Contains(pcLine, "ERROR") != 0U)
@@ -402,12 +452,68 @@ uint8_t ModemPort_QueueCommand(const char *pcCommand, const char *pcExpected, ui
     m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].pcCommand = pcCommand;
     m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].pcExpected = pcExpected;
     m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].u32TimeoutMs = u32TimeoutMs;
+    m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].u8LogEnabled = 1U;
     m_stModemPortRuntime.u8WriteIndex++;
     if (m_stModemPortRuntime.u8WriteIndex >= MODEM_PORT_QUEUE_LENGTH)
     {
         m_stModemPortRuntime.u8WriteIndex = 0U;
     }
     m_stModemPortRuntime.u8Count++;
+    return 1U;
+}
+
+/*******************************************************
+  * Name    :ModemPort_QueueSilentCommand
+  * Author  :LoH
+  * Function:Queue one AT command without periodic success-response logging.
+  * Version :V1.0.0
+  * Data    :2026.09.13
+*******************************************************/
+uint8_t ModemPort_QueueSilentCommand(const char *pcCommand, const char *pcExpected, uint32_t u32TimeoutMs)
+{
+    if ((pcCommand == 0)
+        || (pcExpected == 0)
+        || (u32TimeoutMs == 0U)
+        || (m_stModemPortRuntime.u8Count >= MODEM_PORT_QUEUE_LENGTH)
+        || (m_stModemPortStatus.u8HasFailure != 0U))
+    {
+        return 0U;
+    }
+
+    m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].pcCommand = pcCommand;
+    m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].pcExpected = pcExpected;
+    m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].u32TimeoutMs = u32TimeoutMs;
+    m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].u8LogEnabled = 0U;
+    m_stModemPortRuntime.u8WriteIndex++;
+    if (m_stModemPortRuntime.u8WriteIndex >= MODEM_PORT_QUEUE_LENGTH)
+    {
+        m_stModemPortRuntime.u8WriteIndex = 0U;
+    }
+    m_stModemPortRuntime.u8Count++;
+    return 1U;
+}
+
+/*******************************************************
+  * Name    :ModemPort_AbortActiveCommand
+  * Author  :LoH
+  * Function:Release one local AT completion wait without sending a modem stop command.
+  * Version :V1.0.0
+  * Data    :2026.09.13
+*******************************************************/
+uint8_t ModemPort_AbortActiveCommand(void)
+{
+    if (m_stModemPortRuntime.u8Active == 0U)
+    {
+        return 0U;
+    }
+
+    m_stModemPortRuntime.u8Active = 0U;
+    m_stModemPortRuntime.u8SuppressTrailingOk = 0U;
+    m_stModemPortRuntime.stActiveCommand.pcCommand = 0;
+    m_stModemPortRuntime.stActiveCommand.pcExpected = 0;
+    m_stModemPortRuntime.stActiveCommand.u32TimeoutMs = 0U;
+    m_stModemPortRuntime.stActiveCommand.u8LogEnabled = 0U;
+    m_stModemPortStatus.enLastResult = MODEM_PORT_RESULT_IDLE;
     return 1U;
 }
 

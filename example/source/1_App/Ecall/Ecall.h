@@ -48,6 +48,10 @@ typedef struct
     uint32_t utc_seconds;
     int32_t history_latitude_e7[ECALL_GNSS_HISTORY_COUNT];
     int32_t history_longitude_e7[ECALL_GNSS_HISTORY_COUNT];
+    uint8_t delta_v_longitudinal_raw;
+    uint8_t delta_v_lateral_raw;
+    uint8_t occupants;
+    uint8_t rollover;
 } EcallMsd_t;
 
 /* Initialize eCall session state. */

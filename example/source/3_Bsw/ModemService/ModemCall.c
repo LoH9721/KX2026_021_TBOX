@@ -9,6 +9,7 @@
 #include <stdio.h>
 #include <string.h>
 #include "Hmi.h"
+#include "ModemAudio.h"
 #include "ModemAt_Cfg.h"
 #include "ModemPort.h"
 
@@ -18,17 +19,23 @@
 typedef enum
 {
     MODEM_CALL_STEP_IDLE = 0U,
+    MODEM_CALL_STEP_AUDIO_QUEUE,
+    MODEM_CALL_STEP_AUDIO_WAIT,
     MODEM_CALL_STEP_QUEUE,
     MODEM_CALL_STEP_WAIT_COMMAND,
     MODEM_CALL_STEP_WAIT_VOICE,
     MODEM_CALL_STEP_CEER_QUEUE,
     MODEM_CALL_STEP_CEER_WAIT,
+    MODEM_CALL_STEP_AUDIO_OFF_QUEUE,
+    MODEM_CALL_STEP_AUDIO_OFF_WAIT,
     MODEM_CALL_STEP_RETRY_WAIT
 } ModemCallStep_t;
 
 typedef struct
 {
     ModemCallStep_t enStep;
+    ModemCallState_t enTerminalState;
+    uint8_t u8AudioReady;
     uint8_t u8VoiceProgressObserved;
     uint8_t u8RetryCount;
     uint32_t u32VoiceWaitMs;
@@ -38,6 +45,8 @@ typedef struct
 } ModemCallRuntime_t;
 
 static ModemCallRuntime_t s_mCallRun;
+
+static void ModemCall_EnterTerminalState(ModemCallState_t *penCallState, ModemCallState_t enTerminalState);
 
 /*******************************************************
   * Name    :ModemCall_GetCeerCause
@@ -98,6 +107,23 @@ static void ModemCall_EnterCeerQuery(ModemCallState_t *penCallState)
 }
 
 /*******************************************************
+  * Name    :ModemCall_EnterTerminalState
+  * Author  :LoH
+  * Function:Keep call ownership until U22 external-speaker shutdown precedes one terminal call state.
+  * Version :V1.0.0
+  * Data    :2026.09.13
+*******************************************************/
+static void ModemCall_EnterTerminalState(ModemCallState_t *penCallState, ModemCallState_t enTerminalState)
+{
+    if (penCallState != 0)
+    {
+        s_mCallRun.enTerminalState = enTerminalState;
+        s_mCallRun.enStep = MODEM_CALL_STEP_AUDIO_OFF_QUEUE;
+        *penCallState = MODEM_CALL_DIALING;
+    }
+}
+
+/*******************************************************
   * Name    :ModemCall_GetRetryDelayMs
   * Author  :LoH
   * Function:Return the SRS retry delay for one completed voice connection failure.
@@ -131,14 +157,12 @@ static void ModemCall_EnterRetryWait(ModemCallState_t *penCallState)
 {
     if (MODEM_AT_CFG_VOICE_RETRY_ENABLED == 0U)
     {
-        *penCallState = MODEM_CALL_FAILED;
-        s_mCallRun.enStep = MODEM_CALL_STEP_IDLE;
+        ModemCall_EnterTerminalState(penCallState, MODEM_CALL_FAILED);
         HMI_LOG_MODEM("VOICE_RETRY_DISABLED\r\n");
     }
     else if (s_mCallRun.u32RetryElapsedMs >= MODEM_AT_CFG_VOICE_RETRY_WINDOW_MS)
     {
-        *penCallState = MODEM_CALL_FAILED;
-        s_mCallRun.enStep = MODEM_CALL_STEP_IDLE;
+        ModemCall_EnterTerminalState(penCallState, MODEM_CALL_FAILED);
         HMI_LOG_MODEM("VOICE_RETRY_WINDOW_EXPIRED\r\n");
     }
     else
@@ -166,19 +190,20 @@ void ModemCall_Init(void)
 /*******************************************************
   * Name    :ModemCall_Reset
   * Author  :LoH
-  * Function:Clear the private call delay counter for one new call request.
+  * Function:Clear the private call runtime and pending U22 external-speaker configuration for one new request.
   * Version :V1.0.0
   * Data    :2026.08.28
 *******************************************************/
 void ModemCall_Reset(void)
 {
     (void)memset(&s_mCallRun, 0, sizeof(s_mCallRun));
+    ModemAudio_Reset();
 }
 
 /*******************************************************
   * Name    :ModemCall_Start
   * Author  :LoH
-  * Function:Start one AC7600 voice-call transaction after MSD confirmation.
+  * Function:Start one U22 external-speaker-prepared AC7600 voice-call transaction after MSD confirmation.
   * Version :V1.0.0
   * Data    :2026.08.28
 *******************************************************/
@@ -186,7 +211,9 @@ void ModemCall_Start(ModemCallState_t *penCallState)
 {
     if (penCallState != 0)
     {
-        s_mCallRun.enStep = MODEM_CALL_STEP_QUEUE;
+        ModemAudio_Reset();
+        s_mCallRun.enStep = MODEM_CALL_STEP_AUDIO_QUEUE;
+        s_mCallRun.u8AudioReady = 0U;
         s_mCallRun.u8VoiceProgressObserved = 0U;
         s_mCallRun.u32VoiceWaitMs = 0U;
         s_mCallRun.u32RetryHoldMs = 0U;
@@ -199,7 +226,7 @@ void ModemCall_Start(ModemCallState_t *penCallState)
 /*******************************************************
   * Name    :ModemCall_Process
   * Author  :LoH
-  * Function:Send ATD and classify AC7600 voice-call command and URC results.
+  * Function:Verify U22 external-speaker audio, send ATD, and classify AC7600 voice-call command and URC results.
   * Version :V1.0.0
   * Data    :2026.08.28
 *******************************************************/
@@ -241,21 +268,50 @@ void ModemCall_Process(ModemCallState_t *penCallState)
         return;
     }
 
-    if (s_mCallRun.u32RetryElapsedMs < MODEM_AT_CFG_VOICE_RETRY_WINDOW_MS)
+    if ((s_mCallRun.enStep != MODEM_CALL_STEP_AUDIO_QUEUE)
+        && (s_mCallRun.enStep != MODEM_CALL_STEP_AUDIO_WAIT)
+        && (s_mCallRun.u32RetryElapsedMs < MODEM_AT_CFG_VOICE_RETRY_WINDOW_MS))
     {
         s_mCallRun.u32RetryElapsedMs += MODEM_CALL_PROCESS_PERIOD_MS;
     }
 
     if (s_mCallRun.u32RetryElapsedMs >= MODEM_AT_CFG_VOICE_RETRY_WINDOW_MS)
     {
-        *penCallState = MODEM_CALL_FAILED;
-        s_mCallRun.enStep = MODEM_CALL_STEP_IDLE;
+        ModemCall_EnterTerminalState(penCallState, MODEM_CALL_FAILED);
         HMI_LOG_MODEM("VOICE_RETRY_WINDOW_EXPIRED\r\n");
         return;
     }
 
     switch (s_mCallRun.enStep)
     {
+        case MODEM_CALL_STEP_AUDIO_QUEUE:
+            if (ModemAudio_RequestSpeakerEnable() != 0U)
+            {
+                s_mCallRun.enStep = MODEM_CALL_STEP_AUDIO_WAIT;
+            }
+            else
+            {
+                ModemCall_EnterRetryWait(penCallState);
+            }
+            break;
+
+        case MODEM_CALL_STEP_AUDIO_WAIT:
+            if (ModemAudio_HasFailure() != 0U)
+            {
+                HMI_LOG_MODEM("AUDIO_SPEAKER_FAILED\r\n");
+                ModemCall_EnterRetryWait(penCallState);
+            }
+            else if (ModemAudio_IsSpeakerReady() != 0U)
+            {
+                s_mCallRun.u8AudioReady = 1U;
+                s_mCallRun.enStep = MODEM_CALL_STEP_QUEUE;
+            }
+            else
+            {
+                /* Wait for the verified U22 external-speaker configuration. */
+            }
+            break;
+
         case MODEM_CALL_STEP_QUEUE:
             ModemPort_ClearFailure();
             i32Length = snprintf(s_mCallRun.acDialCommand,
@@ -350,8 +406,7 @@ void ModemCall_Process(ModemCallState_t *penCallState)
                 if ((ModemCall_GetCeerCause(ModemPort_GetLastMatchedResponse(), &u16CeerCause) != 0U)
                     && ((u16CeerCause == 16U) || (u16CeerCause == 31U)))
                 {
-                    *penCallState = MODEM_CALL_ENDED;
-                    s_mCallRun.enStep = MODEM_CALL_STEP_IDLE;
+                    ModemCall_EnterTerminalState(penCallState, MODEM_CALL_ENDED);
                     HMI_LOG_MODEM("VOICE_RELEASE_NORMAL\r\n");
                 }
                 else
@@ -366,13 +421,51 @@ void ModemCall_Process(ModemCallState_t *penCallState)
             }
             break;
 
+        case MODEM_CALL_STEP_AUDIO_OFF_QUEUE:
+            if (ModemAudio_RequestSpeakerOff() != 0U)
+            {
+                s_mCallRun.enStep = MODEM_CALL_STEP_AUDIO_OFF_WAIT;
+            }
+            else
+            {
+                *penCallState = MODEM_CALL_FAILED;
+                s_mCallRun.enStep = MODEM_CALL_STEP_IDLE;
+                HMI_LOG_MODEM("AUDIO_SPEAKER_OFF_FAILED\r\n");
+            }
+            break;
+
+        case MODEM_CALL_STEP_AUDIO_OFF_WAIT:
+            if (ModemAudio_IsSpeakerOff() != 0U)
+            {
+                *penCallState = s_mCallRun.enTerminalState;
+                s_mCallRun.enStep = MODEM_CALL_STEP_IDLE;
+            }
+            else if (ModemAudio_HasFailure() != 0U)
+            {
+                *penCallState = MODEM_CALL_FAILED;
+                s_mCallRun.enStep = MODEM_CALL_STEP_IDLE;
+                HMI_LOG_MODEM("AUDIO_SPEAKER_OFF_FAILED\r\n");
+            }
+            else
+            {
+                /* Wait for the U22 external-speaker shutdown command response. */
+            }
+            break;
+
         case MODEM_CALL_STEP_RETRY_WAIT:
             s_mCallRun.u32RetryHoldMs += MODEM_CALL_PROCESS_PERIOD_MS;
             if (s_mCallRun.u32RetryHoldMs >= ModemCall_GetRetryDelayMs(s_mCallRun.u8RetryCount))
             {
                 s_mCallRun.u32VoiceWaitMs = 0U;
                 s_mCallRun.u8VoiceProgressObserved = 0U;
-                s_mCallRun.enStep = MODEM_CALL_STEP_QUEUE;
+                if (s_mCallRun.u8AudioReady != 0U)
+                {
+                    s_mCallRun.enStep = MODEM_CALL_STEP_QUEUE;
+                }
+                else
+                {
+                    s_mCallRun.enStep = MODEM_CALL_STEP_AUDIO_QUEUE;
+                }
                 HMI_LOG_MODEM("VOICE_RETRY_START\r\n");
             }
             else
@@ -382,8 +475,7 @@ void ModemCall_Process(ModemCallState_t *penCallState)
             break;
 
         default:
-            *penCallState = MODEM_CALL_FAILED;
-            s_mCallRun.enStep = MODEM_CALL_STEP_IDLE;
+            ModemCall_EnterTerminalState(penCallState, MODEM_CALL_FAILED);
             break;
     }
 }

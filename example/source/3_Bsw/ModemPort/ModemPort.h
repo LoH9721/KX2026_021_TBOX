@@ -30,6 +30,10 @@ typedef enum
 
 void ModemPort_Init(void);
 uint8_t ModemPort_QueueCommand(const char *pcCommand, const char *pcExpected, uint32_t u32TimeoutMs);
+/* Queue one background AT command while preserving error and URC diagnostics. */
+uint8_t ModemPort_QueueSilentCommand(const char *pcCommand, const char *pcExpected, uint32_t u32TimeoutMs);
+/* Release a locally pending AT response wait without sending a modem command. */
+uint8_t ModemPort_AbortActiveCommand(void);
 /* Send one fixed-length payload after a completed CIPSEND prompt transaction. */
 uint8_t ModemPort_SendData(const uint8_t *pu8Data, uint16_t u16Length, const char *pcExpected, uint32_t u32TimeoutMs);
 void ModemPort_Process(void);

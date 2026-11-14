@@ -9,8 +9,11 @@
 #include "Hmi.h"
 #include "ModemPort.h"
 #include "ModemService.h"
+#include "OutputService.h"
 #include "RteSys.h"
 #include "TaskManager.h"
+
+#define MODEM_TASK_POWER_ON_AUTO_SOS_ENABLE    0U
 
 /*******************************************************
   * Name    :ModemTask_ShowServiceState
@@ -44,7 +47,7 @@ static void ModemTask_ShowServiceState(ModemServiceState_t enServiceState)
   * Author  :LoH
   * Function:Process modem service and report call states.
   * Version :V1.0.0
-  * Data    :2026.08.26
+  * Data    :2026.09.06
 *******************************************************/
 static void ModemTask_Entry(void const *argument)
 {
@@ -52,11 +55,18 @@ static void ModemTask_Entry(void const *argument)
     ModemCallState_t enCurrentState;
     ModemServiceState_t enLastServiceState = MODEM_SERVICE_SLEEP;
     ModemServiceState_t enCurrentServiceState;
-    RteKl15State_t enLastKl15State = RTE_KL15_OFF;
-    RteKl15State_t enCurrentKl15State;
+    RteSwitchState_t enLastKl15State = RTE_SWITCH_INACTIVE;
+    RteSwitchState_t enCurrentKl15State;
+    uint8_t u8PowerOnAutoSosPending = MODEM_TASK_POWER_ON_AUTO_SOS_ENABLE;
 
     (void)argument;
     Hmi_ShowTaskStarted("ModemTask");
+
+    if (u8PowerOnAutoSosPending != 0U)
+    {
+        HMI_LOG_MODEM("POWER_ON_NETWORK_START\r\n");
+        ModemService_RequestNetworkOnline();
+    }
 
     for (;;)
     {
@@ -64,11 +74,12 @@ static void ModemTask_Entry(void const *argument)
         ModemService_Process();
         enCurrentState = ModemService_GetCallState();
         enCurrentServiceState = ModemService_GetState();
-        enCurrentKl15State = (RteKl15State_t)RteSys_GetU8Sig(RTESYS_U8_KL15_STATE);
+        enCurrentKl15State = RteSys_GetSwitchState(RTESYS_SWITCH_KL15);
+        OutputService_SetVoiceCallReady((enCurrentServiceState == MODEM_SERVICE_PLATFORM_ACTIVE) ? 1U : 0U);
 
         if (enCurrentKl15State != enLastKl15State)
         {
-            if (enCurrentKl15State == RTE_KL15_ON)
+            if (enCurrentKl15State == RTE_SWITCH_ACTIVE)
             {
                 HMI_LOG_MODEM("KL15_ON\r\n");
                 ModemService_RequestNetworkOnline();
@@ -85,6 +96,14 @@ static void ModemTask_Entry(void const *argument)
         {
             ModemTask_ShowServiceState(enCurrentServiceState);
             enLastServiceState = enCurrentServiceState;
+        }
+
+        if ((u8PowerOnAutoSosPending != 0U)
+            && (enCurrentServiceState == MODEM_SERVICE_PLATFORM_ACTIVE))
+        {
+            u8PowerOnAutoSosPending = 0U;
+            HMI_LOG_MODEM("POWER_ON_AUTO_SOS\r\n");
+            EcallTask_PostEvent(ECALL_TASK_EVT_AUTO_TRIGGER);
         }
 
         if (enCurrentState != enLastState)

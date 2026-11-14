@@ -9,33 +9,67 @@
 #include "Types.h"
 #include "RteSys.h"
 /*-------------variable statement---------------------*/
-static uint8_t g_RteSysU8Sig[RTESYS_U8_TYPE_MAX];
+static RteSwitchState_t s_aeRteSysSwitchState[RTESYS_SWITCH_NUM];
+static RteSwitchState_t s_aeRteSysOutputState[RTESYS_OUTPUT_NUM];
 
 /*******************************************************
-  * Name    :RteSys_SetU8Sig
+  * Name    :RteSys_SetSwitchState
   * Author  :LoH
-  * Function:Set TBOX RTE U8 signal value.
+  * Function:Set one normalized TBOX switch state.
   * Version :V1.0.0
+  * Data    :2026.09.06
 *******************************************************/
-void RteSys_SetU8Sig(RteSys_U8_Type id, uint8_t sig)
+void RteSys_SetSwitchState(RteSysSwitchId_t enSwitch, RteSwitchState_t enState)
 {
-    if (id < RTESYS_U8_TYPE_MAX)
+    if (enSwitch < RTESYS_SWITCH_NUM)
     {
-        g_RteSysU8Sig[id] = sig;
+        s_aeRteSysSwitchState[enSwitch] = enState;
     }
 }
 
 /*******************************************************
-  * Name    :RteSys_GetU8Sig
+  * Name    :RteSys_GetSwitchState
   * Author  :LoH
-  * Function:Get TBOX RTE U8 signal value.
+  * Function:Get one normalized TBOX switch state.
   * Version :V1.0.0
+  * Data    :2026.09.06
 *******************************************************/
-uint8_t RteSys_GetU8Sig(RteSys_U8_Type id)
+RteSwitchState_t RteSys_GetSwitchState(RteSysSwitchId_t enSwitch)
 {
-    if (id < RTESYS_U8_TYPE_MAX)
+    if (enSwitch < RTESYS_SWITCH_NUM)
     {
-        return g_RteSysU8Sig[id];
+        return s_aeRteSysSwitchState[enSwitch];
     }
-    return (uint8_t)RTE_SWITCH_RELEASED;
+    return RTE_SWITCH_INACTIVE;
+}
+
+/*******************************************************
+  * Name    :RteSys_SetOutputState
+  * Author  :LoH
+  * Function:Set one normalized TBOX output request.
+  * Version :V1.0.0
+  * Data    :2026.09.06
+*******************************************************/
+void RteSys_SetOutputState(RteSysOutputId_t enOutput, RteSwitchState_t enState)
+{
+    if (enOutput < RTESYS_OUTPUT_NUM)
+    {
+        s_aeRteSysOutputState[enOutput] = enState;
+    }
+}
+
+/*******************************************************
+  * Name    :RteSys_GetOutputState
+  * Author  :LoH
+  * Function:Get one normalized TBOX output request.
+  * Version :V1.0.0
+  * Data    :2026.09.06
+*******************************************************/
+RteSwitchState_t RteSys_GetOutputState(RteSysOutputId_t enOutput)
+{
+    if (enOutput < RTESYS_OUTPUT_NUM)
+    {
+        return s_aeRteSysOutputState[enOutput];
+    }
+    return RTE_SWITCH_INACTIVE;
 }

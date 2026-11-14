@@ -8,11 +8,14 @@
 #include "ModemService.h"
 #include <string.h>
 #include "Hmi.h"
+#include "ModemAudio.h"
 #include "ModemCall.h"
 #include "ModemGnss.h"
 #include "ModemNetwork.h"
 #include "ModemPlatform.h"
+#include "ModemPower.h"
 #include "ModemPort.h"
+#include "ModemTime.h"
 
 #define MODEM_NETWORK_PROCESS_PERIOD_MS     100U
 #define MODEM_NETWORK_SLEEP_HOLD_MS         300000UL
@@ -20,6 +23,7 @@
 typedef struct
 {
     uint8_t u8EmergencyRequestPending;
+    uint8_t u8NetworkOnlineRequested;
     uint8_t u8NetworkSleepRequested;
     uint32_t u32NetworkSleepHoldMs;
 } ModemServiceRuntime_t;
@@ -32,6 +36,8 @@ typedef struct
 
 static ModemServiceRuntime_t s_mSvcRun;
 static ModemServiceStatus_t s_mSvcSts;
+
+static void ModemService_TryStartNetwork(void);
 
 /*******************************************************
   * Name    :ModemService_IsVoiceCallInProgress
@@ -58,10 +64,47 @@ static void ModemService_EnterNetworkSleep(void)
     s_mSvcSts.enServiceState = MODEM_SERVICE_SLEEP;
     ModemNetwork_Reset();
     ModemPlatform_Reset();
+    s_mSvcRun.u8NetworkOnlineRequested = 0U;
 
     if (s_mSvcRun.u8EmergencyRequestPending != 0U)
     {
         s_mSvcSts.enCallState = MODEM_CALL_FAILED;
+    }
+}
+
+/*******************************************************
+  * Name    :ModemService_StartEmergencyCallFallback
+  * Author  :LoH
+  * Function:Release failed data-service work and continue one approved emergency voice call.
+  * Version :V1.0.0
+  * Data    :2026.09.13
+*******************************************************/
+static void ModemService_StartEmergencyCallFallback(const char *pcLog)
+{
+    ModemNetwork_Reset();
+    ModemPlatform_Reset();
+    s_mSvcSts.enServiceState = MODEM_SERVICE_SLEEP;
+    s_mSvcRun.u8NetworkOnlineRequested = 0U;
+    s_mSvcRun.u8NetworkSleepRequested = 0U;
+    ModemCall_Start(&s_mSvcSts.enCallState);
+    HMI_LOG_MODEM(pcLog);
+}
+
+/*******************************************************
+  * Name    :ModemService_TryStartNetwork
+  * Author  :LoH
+  * Function:Start the network flow only after the physical modem path is ready for AT traffic.
+  * Version :V1.0.0
+  * Data    :2026.09.06
+*******************************************************/
+static void ModemService_TryStartNetwork(void)
+{
+    if ((s_mSvcRun.u8NetworkOnlineRequested != 0U)
+        && (s_mSvcSts.enServiceState == MODEM_SERVICE_SLEEP)
+        && (ModemPower_IsOnlineReady() != 0U))
+    {
+        ModemNetwork_Start();
+        s_mSvcSts.enServiceState = MODEM_SERVICE_NETWORK_STARTUP;
     }
 }
 
@@ -76,7 +119,14 @@ static void ModemService_ProcessNetworkStartup(void)
 {
     if (ModemNetwork_TakeFailure() != 0U)
     {
-        ModemService_EnterNetworkSleep();
+        if (s_mSvcRun.u8EmergencyRequestPending != 0U)
+        {
+            ModemService_StartEmergencyCallFallback("NETWORK_FAILED_CALL_FALLBACK\r\n");
+        }
+        else
+        {
+            ModemService_EnterNetworkSleep();
+        }
     }
     else if (ModemNetwork_TakeTcpConnected() != 0U)
     {
@@ -114,7 +164,14 @@ static void ModemService_ProcessPlatform(void)
 
         case MODEM_PLATFORM_EVENT_FAILED:
         default:
-            ModemService_EnterNetworkSleep();
+            if (s_mSvcRun.u8EmergencyRequestPending != 0U)
+            {
+                ModemService_StartEmergencyCallFallback("MSD_UPLOAD_FAILED_CALL_FALLBACK\r\n");
+            }
+            else
+            {
+                ModemService_EnterNetworkSleep();
+            }
             break;
     }
 }
@@ -142,6 +199,7 @@ static void ModemService_ProcessOnlineSleep(void)
         {
             HMI_LOG_MODEM("KL15_OFF_SLEEP\r\n");
             ModemService_EnterNetworkSleep();
+            ModemPower_RequestUartSleep();
             s_mSvcRun.u32NetworkSleepHoldMs = 0U;
         }
     }
@@ -150,7 +208,7 @@ static void ModemService_ProcessOnlineSleep(void)
 /*******************************************************
   * Name    :ModemService_Init
   * Author  :LoH
-  * Function:Reset modem network, platform and call states before task scheduling.
+  * Function:Reset modem network, platform, audio and call states before task scheduling.
   * Version :V1.0.0
   * Data    :2026.08.28
 *******************************************************/
@@ -163,8 +221,11 @@ void ModemService_Init(void)
     ModemPort_Init();
     ModemNetwork_Init();
     ModemPlatform_Init();
+    ModemAudio_Init();
     ModemCall_Init();
     ModemGnss_Init();
+    ModemTime_Init();
+    ModemPower_Init();
 }
 
 /*******************************************************
@@ -184,16 +245,9 @@ void ModemService_RequestEmergencyCall(const EcallMsd_t *pstMsd)
         ModemCall_Reset();
         ModemPlatform_RequestMsdUpload(pstMsd);
         s_mSvcRun.u8EmergencyRequestPending = 1U;
+        s_mSvcRun.u8NetworkOnlineRequested = 1U;
         s_mSvcRun.u8NetworkSleepRequested = 0U;
-        if (s_mSvcSts.enServiceState == MODEM_SERVICE_SLEEP)
-        {
-            ModemNetwork_Start();
-            s_mSvcSts.enServiceState = MODEM_SERVICE_NETWORK_STARTUP;
-        }
-        else
-        {
-            /* Existing network or platform work continues before MSD upload. */
-        }
+        ModemPower_RequestOnline();
         s_mSvcSts.enCallState = MODEM_CALL_PREPARING;
     }
 }
@@ -209,12 +263,8 @@ void ModemService_RequestNetworkOnline(void)
 {
     s_mSvcRun.u8NetworkSleepRequested = 0U;
     s_mSvcRun.u32NetworkSleepHoldMs = 0U;
-
-    if (s_mSvcSts.enServiceState == MODEM_SERVICE_SLEEP)
-    {
-        ModemNetwork_Start();
-        s_mSvcSts.enServiceState = MODEM_SERVICE_NETWORK_STARTUP;
-    }
+    s_mSvcRun.u8NetworkOnlineRequested = 1U;
+    ModemPower_RequestOnline();
 }
 
 /*******************************************************
@@ -237,7 +287,7 @@ void ModemService_RequestNetworkSleep(void)
 /*******************************************************
   * Name    :ModemService_Process
   * Author  :LoH
-  * Function:Dispatch network, platform and independent call workflows.
+  * Function:Dispatch network, platform, audio and independent call workflows.
   * Version :V1.0.0
   * Data    :2026.08.28
 *******************************************************/
@@ -245,9 +295,24 @@ void ModemService_Process(void)
 {
     uint8_t u8PlatformWasOnline;
 
+    ModemPower_Process();
+    ModemService_TryStartNetwork();
+
+    if ((s_mSvcRun.u8EmergencyRequestPending != 0U)
+        && (ModemGnss_IsBusy() != 0U))
+    {
+        ModemGnss_AbortForEmergency();
+    }
+
     if (ModemGnss_IsBusy() != 0U)
     {
         ModemGnss_Process(0U);
+        return;
+    }
+
+    if (ModemTime_IsBusy() != 0U)
+    {
+        ModemTime_Process(0U);
         return;
     }
 
@@ -300,6 +365,7 @@ void ModemService_Process(void)
             break;
     }
 
+    ModemAudio_Process();
     ModemCall_Process(&s_mSvcSts.enCallState);
 
     if ((s_mSvcSts.enCallState == MODEM_CALL_ENDED)
@@ -316,7 +382,11 @@ void ModemService_Process(void)
             || (s_mSvcSts.enCallState == MODEM_CALL_FAILED))
         && (ModemPlatform_IsBackgroundAllowed() != 0U))
     {
-        ModemGnss_Process(1U);
+        ModemTime_Process(1U);
+        if (ModemTime_IsBusy() == 0U)
+        {
+            ModemGnss_Process(1U);
+        }
     }
 
 }

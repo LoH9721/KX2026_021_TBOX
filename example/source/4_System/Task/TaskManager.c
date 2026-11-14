@@ -11,8 +11,11 @@
 #include "Hmi.h"
 #include "InputService.h"
 #include "ModemService.h"
+#include "OutputService.h"
 #include "PowerService.h"
 #include "TaskManager.h"
+#include "EthService.h"
+#include "TimeService.h"
 
 extern void EcallTask_Create(void);
 extern void CanTask_Create(void);
@@ -21,6 +24,7 @@ extern void GnssTask_Create(void);
 extern void MonitoringTask_Create(void);
 extern void AppTask_Create(void);
 extern void PowTask_Create(void);
+extern void EthTask_Create(void);
 
 /*******************************************************
   * Name    :TaskManager_Start
@@ -34,11 +38,14 @@ void TaskManager_Start(void)
     Hmi_Init();
     PowerService_Init();
     GnssService_Init();
+    TimeService_Init();
     ModemService_Init();
     CanService_Init();
     InputService_Init();
+    OutputService_Init();
     Ecall_Init();
-
+    EthService_Init();
+    
     PowTask_Create();
     GnssTask_Create();
     ModemTask_Create();
@@ -46,4 +53,5 @@ void TaskManager_Start(void)
     MonitoringTask_Create();
     AppTask_Create();
     EcallTask_Create();
+    EthTask_Create();
 }

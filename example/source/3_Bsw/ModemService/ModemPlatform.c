@@ -245,11 +245,28 @@ static int32_t ModemPlatform_E7ToAecsRaw(int32_t i32CoordinateE7)
 }
 
 /*******************************************************
+  * Name    :ModemPlatform_GetTriggerType
+  * Author  :LoH
+  * Function:Convert internal trigger source bits to the AECS manual or automatic MSD enum.
+  * Version :V1.0.0
+  * Data    :2026.09.06
+*******************************************************/
+static uint8_t ModemPlatform_GetTriggerType(uint8_t u8TriggerMask)
+{
+    if ((u8TriggerMask & (ECALL_TRIGGER_MASK_AUTO | ECALL_TRIGGER_MASK_CAN)) != 0U)
+    {
+        return 1U;
+    }
+
+    return 0U;
+}
+
+/*******************************************************
   * Name    :ModemPlatform_PrepareMsdFrame
   * Author  :LoH
   * Function:Build the reference-compatible candidate 111-byte MSD platform frame.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.09.06
 *******************************************************/
 static uint8_t ModemPlatform_PrepareMsdFrame(void)
 {
@@ -263,7 +280,7 @@ static uint8_t ModemPlatform_PrepareMsdFrame(void)
     pu8Payload = &s_mPlatRun.au8MsdFrame[5];
     pu8Payload[0] = MODEM_PLATFORM_MSD_VERSION;
     pu8Payload[1] = MODEM_PLATFORM_MSD_IDENTIFIER;
-    pu8Payload[2] = s_mPlatRun.stLastMsd.trigger_mask;
+    pu8Payload[2] = ModemPlatform_GetTriggerType(s_mPlatRun.stLastMsd.trigger_mask);
     pu8Payload[3] = MODEM_PLATFORM_MSD_TEST_CALL;
     pu8Payload[4] = MODEM_PLATFORM_MSD_VEHICLE_TYPE;
     (void)memcpy(&pu8Payload[5], MODEM_PLATFORM_TEST_VIN, MODEM_PLATFORM_MSD_VIN_LENGTH);
@@ -282,6 +299,10 @@ static uint8_t ModemPlatform_PrepareMsdFrame(void)
                                 (uint32_t)ModemPlatform_E7ToAecsRaw(
                                     s_mPlatRun.stLastMsd.history_latitude_e7[u8Index]));
     }
+    pu8Payload[107] = s_mPlatRun.stLastMsd.delta_v_longitudinal_raw;
+    pu8Payload[108] = s_mPlatRun.stLastMsd.delta_v_lateral_raw;
+    pu8Payload[109] = s_mPlatRun.stLastMsd.occupants;
+    pu8Payload[110] = s_mPlatRun.stLastMsd.rollover;
     s_mPlatRun.u16MsdFrameLength = MODEM_PLATFORM_MSD_FRAME_LENGTH;
 
     i32CommandLength = snprintf(s_mPlatRun.acMsdCommand, sizeof(s_mPlatRun.acMsdCommand),

@@ -15,6 +15,12 @@ typedef struct
     int32_t i32LatitudeE7;
     int32_t i32LongitudeE7;
     uint32_t u32UtcSeconds;
+    uint8_t u8Year;
+    uint8_t u8Month;
+    uint8_t u8Day;
+    uint8_t u8Hour;
+    uint8_t u8Minute;
+    uint8_t u8Second;
 } ModemGnssSample_t;
 
 /* Initialize the private AC7600 GNSS query workflow. */
@@ -23,6 +29,8 @@ void ModemGnss_Init(void);
 void ModemGnss_Process(uint8_t u8StartAllowed);
 /* Return whether an active GNSS AT transaction owns the modem port. */
 uint8_t ModemGnss_IsBusy(void);
+/* Preempt a background GNSS AT wait for an emergency workflow without powering GNSS off. */
+void ModemGnss_AbortForEmergency(void);
 /* Return and clear one valid parsed GNSS sample. */
 uint8_t ModemGnss_TakeSample(ModemGnssSample_t *pstSample);
 

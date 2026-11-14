@@ -7,15 +7,50 @@
 *******************************************************/
 #include "cmsis_os.h"
 #include "FreeRTOS.h"
+#include "CanService.h"
 #include "Ecall.h"
 #include "GnssService.h"
 #include "Hmi.h"
 #include "TaskManager.h"
+#include <string.h>
 
 osMessageQDef(EcallTaskEventQueue, 8U, uint32_t);
 static osMessageQId m_xEcallEventQueue;
 static uint8_t m_u8PendingTriggerMask = 0U;
 static uint8_t m_u8TriggerWakePending = 0U;
+
+/*******************************************************
+  * Name    :EcallTask_GetMsdSnapshot
+  * Author  :LoH
+  * Function:Merge the latest GNSS and fresh CAN accident data into one snapshot.
+  * Version :V1.0.0
+  * Data    :2026.08.29
+*******************************************************/
+static uint8_t EcallTask_GetMsdSnapshot(EcallMsd_t *pstMsd)
+{
+    CanServiceEcallData_t stCanData;
+    uint8_t u8GnssValid;
+
+    if (pstMsd == NULL)
+    {
+        return 0U;
+    }
+
+    (void)memset(pstMsd, 0, sizeof(*pstMsd));
+    u8GnssValid = GnssService_GetLatest(pstMsd);
+    pstMsd->delta_v_longitudinal_raw = 0U;
+    pstMsd->delta_v_lateral_raw = 0U;
+    pstMsd->occupants = 0xFFU;
+    pstMsd->rollover = 0U;
+    if (CanService_GetEcallData(&stCanData) != 0U)
+    {
+        pstMsd->delta_v_longitudinal_raw = stCanData.u8DeltaVLongitudinalRaw;
+        pstMsd->delta_v_lateral_raw = stCanData.u8DeltaVLateralRaw;
+        pstMsd->occupants = stCanData.u8Occupants;
+        pstMsd->rollover = stCanData.u8Rollover;
+    }
+    return u8GnssValid;
+}
 
 /*******************************************************
   * Name    :EcallTask_GetTriggerMask
@@ -131,10 +166,11 @@ static void EcallTask_Entry(void const *argument)
                     EcallTask_RequestTrigger(ECALL_TRIGGER_CAN);
                     break;
                 case ECALL_TASK_EVT_GNSS_READY:
-                    (void)Ecall_OnGnssResult(&stMsd, GnssService_GetLatest(&stMsd));
+                    (void)Ecall_OnGnssResult(&stMsd, EcallTask_GetMsdSnapshot(&stMsd));
                     break;
                 case ECALL_TASK_EVT_GNSS_TIMEOUT:
-                    Ecall_OnGnssTimeout();
+                    (void)EcallTask_GetMsdSnapshot(&stMsd);
+                    Ecall_OnGnssResult(&stMsd, 0U);
                     break;
                 case ECALL_TASK_EVT_CALL_ACTIVE:
                     Ecall_OnCallActive();

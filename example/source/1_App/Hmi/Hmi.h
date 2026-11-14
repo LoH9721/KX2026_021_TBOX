@@ -19,6 +19,7 @@
 #define HMI_LOG_POWER_ENABLE          0U
 #define HMI_LOG_APP_ENABLE            1U
 #define HMI_LOG_TASK_ENABLE           1U
+#define HMI_LOG_ETH_ENABLE            1U
 
 /* Initialize the HMI log buffer. */
 void Hmi_Init(void);
@@ -80,6 +81,12 @@ void Hmi_SetEcallCancelWindow(uint8_t u8Active);
 #define HMI_LOG_TASK(pcText)          Hmi_LogWithPrefix("[TASK] ", pcText)
 #else
 #define HMI_LOG_TASK(pcText)          do { } while (0)
+#endif
+
+#if (HMI_LOG_ETH_ENABLE != 0U)
+#define HMI_LOG_ETH(pcText)          Hmi_LogWithPrefix("[ETH] ", pcText)
+#else
+#define HMI_LOG_ETH(pcText)          do { } while (0)
 #endif
 
 #endif
