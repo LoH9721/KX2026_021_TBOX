@@ -2778,6 +2778,18 @@
             <group>
                 <name>ModemService</name>
                 <file>
+                    <name>$PROJ_DIR$\..\source\3_Bsw\ModemService\ModemIdentity.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\source\3_Bsw\ModemService\ModemIdentity.h</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\source\3_Bsw\ModemService\ModemMsdCodec.c</name>
+                </file>
+                <file>
+                    <name>$PROJ_DIR$\..\source\3_Bsw\ModemService\ModemMsdCodec.h</name>
+                </file>
+                <file>
                     <name>$PROJ_DIR$\..\source\3_Bsw\ModemService\ModemAudio.c</name>
                 </file>
                 <file>

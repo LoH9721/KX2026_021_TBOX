@@ -56,4 +56,9 @@ ModemPortVoiceEvent_t ModemPort_TakeVoiceEvent(void);
 void ModemPort_ClearTransactionFailure(void);
 void ModemPort_ClearFailure(void);
 
+/* Queue an information-prefix query and wait for its final OK. */
+uint8_t ModemPort_QueueQueryCommand(const char *pcCommand, const char *pcInformationPrefix, uint32_t u32TimeoutMs);
+/* Return the captured information line; an empty successful response stays empty. */
+const char *ModemPort_GetLastInformationLine(void);
+
 #endif

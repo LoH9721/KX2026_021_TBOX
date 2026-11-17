@@ -53,6 +53,7 @@
 #define MODEM_AT_RSP_PDP_OPENED                 "+NETOPEN: 0"
 #define MODEM_AT_RSP_PDP_CLOSED                 "+NETCLOSE: 0"
 #define MODEM_AT_RSP_TCP_OPEN                   "+CIPOPEN:"
+#define MODEM_AT_RSP_TCP_CLOSED                 "+CIPCLOSE:"
 #define MODEM_AT_RSP_TCP_RX_LENGTH              "+CIPRXGET: 4,"
 #define MODEM_AT_RSP_PROMPT                      ">"
 #define MODEM_AT_RSP_ERROR                      "ERROR"
@@ -68,11 +69,27 @@
 
 /* Platform values remain candidates until AC7600 TCP verification completes. */
 #define MODEM_PLATFORM_LINK_ID                  0U
-#define MODEM_PLATFORM_SERVER_IP                "8.137.175.163"
-#define MODEM_PLATFORM_SERVER_PORT              8902U
+#define MODEM_PLATFORM_SERVER_IP                "183.69.173.130"//"8.137.175.163"
+#define MODEM_PLATFORM_SERVER_PORT              24201U//8902U
 #define MODEM_PLATFORM_TEST_DEVICE_ID           0x7091U
 #define MODEM_PLATFORM_TEST_VIN                 "LDC12345678900001"
-#define MODEM_PLATFORM_DIAL_NUMBER              "15823262547"
+#define MODEM_PLATFORM_DIAL_NUMBER              "02361752708"//"15823262547"
+/* MSD V0.2 configuration. Empty identity values are omitted, never fabricated. */
+#define MODEM_PLATFORM_MSD_EXTENSION_ENABLED    1U
+#define MODEM_PLATFORM_SIM_PHONE_NUMBER        ""
+#define MODEM_PLATFORM_ICCID                   ""
+#define MODEM_PLATFORM_IMEI                    ""
+#define MODEM_PLATFORM_HARDWARE_VERSION        ""
+#define MODEM_PLATFORM_SOFTWARE_VERSION        ""
+#define MODEM_AT_CMD_SUBSCRIBER_NUMBER         "AT+CNUM\r\n"
+#define MODEM_MSD_ACK_TIMEOUT_MS               15000UL
+#define MODEM_PLATFORM_REGISTER_ACK_TIMEOUT_MS  5000UL
+#define MODEM_PLATFORM_TCP_CLOSE_GRACE_MS        500UL
+#define MODEM_MSD_FIRST_RETRY_MS               30000UL
+#define MODEM_MSD_LATER_RETRY_MS               120000UL
+#define MODEM_MSD_RETRY_WINDOW_MS              3600000UL
+#define MODEM_AT_CFG_MSD_SEND_RESULT_TIMEOUT_MS 30000UL
+
 #define MODEM_PLATFORM_MSD_VERSION              1U
 #define MODEM_PLATFORM_MSD_IDENTIFIER           1U
 #define MODEM_PLATFORM_MSD_TEST_CALL            1U
@@ -93,6 +110,7 @@
 #define MODEM_AT_CFG_PDP_OPEN_TIMEOUT_MS        10000//120000U
 #define MODEM_AT_CFG_TCP_CFG_TIMEOUT_MS         9000U
 #define MODEM_AT_CFG_TCP_OPEN_TIMEOUT_MS        120000U
+#define MODEM_AT_CFG_TCP_CLOSE_TIMEOUT_MS        10000U
 #define MODEM_AT_CFG_SEND_PROMPT_TIMEOUT_MS      9000U
 #define MODEM_AT_CFG_SEND_RESULT_TIMEOUT_MS      120000U
 #define MODEM_AT_CFG_DIAL_TIMEOUT_MS            30000U
@@ -105,9 +123,9 @@
 #define MODEM_AT_CFG_TIME_TIMEOUT_MS              2000U
 #define MODEM_AT_CFG_UART_SLEEP_TIMEOUT_MS        2000U
 #define MODEM_AT_CFG_AUDIO_I2C_TIMEOUT_MS         2000U
-#define MODEM_AT_CFG_VOICE_RETRY_ENABLED              0U
-#define MODEM_AT_CFG_VOICE_RETRY_FIRST_MS        10000U
-#define MODEM_AT_CFG_VOICE_RETRY_SECOND_MS       30000U
+#define MODEM_AT_CFG_VOICE_RETRY_ENABLED              1U
+#define MODEM_AT_CFG_VOICE_RETRY_FIRST_MS        30000U
+#define MODEM_AT_CFG_VOICE_RETRY_SECOND_MS       120000U
 #define MODEM_AT_CFG_VOICE_RETRY_LATER_MS       120000U
 #define MODEM_AT_CFG_VOICE_RETRY_WINDOW_MS     3600000UL
 #define MODEM_AT_CFG_SEND_TIMEOUT_MS            2000U

@@ -3,7 +3,7 @@
   * Author  :LoH
   * Function:Private modem call state processing implementation.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
 #include "ModemCall.h"
 #include <stdio.h>
@@ -12,6 +12,7 @@
 #include "ModemAudio.h"
 #include "ModemAt_Cfg.h"
 #include "ModemPort.h"
+#include "cmsis_os.h"
 
 #define MODEM_CALL_PROCESS_PERIOD_MS       100U
 #define MODEM_CALL_COMMAND_LENGTH          32U
@@ -37,6 +38,9 @@ typedef struct
     ModemCallState_t enTerminalState;
     uint8_t u8AudioReady;
     uint8_t u8VoiceProgressObserved;
+    uint8_t u8WasConnected;
+    uint32_t u32RetryStartMs;
+    uint32_t u32RetryHoldStartMs;
     uint8_t u8RetryCount;
     uint32_t u32VoiceWaitMs;
     uint32_t u32RetryHoldMs;
@@ -151,10 +155,17 @@ static uint32_t ModemCall_GetRetryDelayMs(uint8_t u8RetryCount)
   * Author  :LoH
   * Function:Schedule one independent voice connection retry within the SRS window.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
 static void ModemCall_EnterRetryWait(ModemCallState_t *penCallState)
 {
+    if (s_mCallRun.u8WasConnected != 0U)
+    {
+        s_mCallRun.u8WasConnected = 0U;
+        s_mCallRun.u8RetryCount = 0U;
+        s_mCallRun.u32RetryElapsedMs = 0U;
+        s_mCallRun.u32RetryStartMs = osKernelSysTick();
+    }
     if (MODEM_AT_CFG_VOICE_RETRY_ENABLED == 0U)
     {
         ModemCall_EnterTerminalState(penCallState, MODEM_CALL_FAILED);
@@ -169,6 +180,7 @@ static void ModemCall_EnterRetryWait(ModemCallState_t *penCallState)
     {
         s_mCallRun.u8RetryCount++;
         s_mCallRun.u32RetryHoldMs = 0U;
+        s_mCallRun.u32RetryHoldStartMs = osKernelSysTick();
         s_mCallRun.u8VoiceProgressObserved = 0U;
         s_mCallRun.enStep = MODEM_CALL_STEP_RETRY_WAIT;
         HMI_LOG_MODEM("VOICE_RETRY_WAIT\r\n");
@@ -203,9 +215,9 @@ void ModemCall_Reset(void)
 /*******************************************************
   * Name    :ModemCall_Start
   * Author  :LoH
-  * Function:Start one U22 external-speaker-prepared AC7600 voice-call transaction after MSD confirmation.
+  * Function:Start one U22 external-speaker-prepared AC7600 voice-call transaction independently of MSD acknowledgement.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
 void ModemCall_Start(ModemCallState_t *penCallState)
 {
@@ -219,6 +231,8 @@ void ModemCall_Start(ModemCallState_t *penCallState)
         s_mCallRun.u32RetryHoldMs = 0U;
         s_mCallRun.u32RetryElapsedMs = 0U;
         s_mCallRun.u8RetryCount = 0U;
+        s_mCallRun.u8WasConnected = 0U;
+        s_mCallRun.u32RetryStartMs = osKernelSysTick();
         *penCallState = MODEM_CALL_DIALING;
     }
 }
@@ -228,9 +242,9 @@ void ModemCall_Start(ModemCallState_t *penCallState)
   * Author  :LoH
   * Function:Verify U22 external-speaker audio, send ATD, and classify AC7600 voice-call command and URC results.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
-void ModemCall_Process(ModemCallState_t *penCallState)
+void ModemCall_Process(ModemCallState_t *penCallState, uint8_t u8PortAllowed)
 {
     ModemPortVoiceEvent_t enVoiceEvent;
     int i32Length;
@@ -268,17 +282,18 @@ void ModemCall_Process(ModemCallState_t *penCallState)
         return;
     }
 
-    if ((s_mCallRun.enStep != MODEM_CALL_STEP_AUDIO_QUEUE)
-        && (s_mCallRun.enStep != MODEM_CALL_STEP_AUDIO_WAIT)
-        && (s_mCallRun.u32RetryElapsedMs < MODEM_AT_CFG_VOICE_RETRY_WINDOW_MS))
-    {
-        s_mCallRun.u32RetryElapsedMs += MODEM_CALL_PROCESS_PERIOD_MS;
-    }
-
-    if (s_mCallRun.u32RetryElapsedMs >= MODEM_AT_CFG_VOICE_RETRY_WINDOW_MS)
+    s_mCallRun.u32RetryElapsedMs = (uint32_t)(osKernelSysTick() - s_mCallRun.u32RetryStartMs);
+    if ((s_mCallRun.u32RetryElapsedMs >= MODEM_AT_CFG_VOICE_RETRY_WINDOW_MS)
+        && (s_mCallRun.u8WasConnected == 0U)
+        && (s_mCallRun.enStep != MODEM_CALL_STEP_AUDIO_OFF_QUEUE)
+        && (s_mCallRun.enStep != MODEM_CALL_STEP_AUDIO_OFF_WAIT))
     {
         ModemCall_EnterTerminalState(penCallState, MODEM_CALL_FAILED);
         HMI_LOG_MODEM("VOICE_RETRY_WINDOW_EXPIRED\r\n");
+    }
+
+    if ((ModemCall_NeedsPort() != 0U) && (u8PortAllowed == 0U))
+    {
         return;
     }
 
@@ -356,6 +371,7 @@ void ModemCall_Process(ModemCallState_t *penCallState)
             }
             else if (enVoiceEvent == MODEM_PORT_VOICE_EVENT_CONNECTED)
             {
+                s_mCallRun.u8WasConnected = 1U;
                 *penCallState = MODEM_CALL_ACTIVE;
                 s_mCallRun.enStep = MODEM_CALL_STEP_IDLE;
             }
@@ -453,7 +469,7 @@ void ModemCall_Process(ModemCallState_t *penCallState)
             break;
 
         case MODEM_CALL_STEP_RETRY_WAIT:
-            s_mCallRun.u32RetryHoldMs += MODEM_CALL_PROCESS_PERIOD_MS;
+            s_mCallRun.u32RetryHoldMs = (uint32_t)(osKernelSysTick() - s_mCallRun.u32RetryHoldStartMs);
             if (s_mCallRun.u32RetryHoldMs >= ModemCall_GetRetryDelayMs(s_mCallRun.u8RetryCount))
             {
                 s_mCallRun.u32VoiceWaitMs = 0U;
@@ -478,4 +494,18 @@ void ModemCall_Process(ModemCallState_t *penCallState)
             ModemCall_EnterTerminalState(penCallState, MODEM_CALL_FAILED);
             break;
     }
+}
+
+/*******************************************************
+  * Name    :ModemCall_NeedsPort
+  * Author  :LoH
+  * Function:Yield the AT port while waiting for call URCs or a scheduled retry.
+  * Version :V1.0.0
+  * Data    :2026.11.14
+*******************************************************/
+uint8_t ModemCall_NeedsPort(void)
+{
+    return ((s_mCallRun.enStep != MODEM_CALL_STEP_IDLE)
+        && (s_mCallRun.enStep != MODEM_CALL_STEP_WAIT_VOICE)
+        && (s_mCallRun.enStep != MODEM_CALL_STEP_RETRY_WAIT)) ? 1U : 0U;
 }

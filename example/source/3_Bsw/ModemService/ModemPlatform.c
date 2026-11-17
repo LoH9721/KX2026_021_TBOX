@@ -3,7 +3,7 @@
   * Author  :LoH
   * Function:Candidate AECS registration, receive, heartbeat and MSD workflow.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
 #include "ModemPlatform.h"
 #include <stdio.h>
@@ -11,6 +11,9 @@
 #include "Hmi.h"
 #include "ModemAt_Cfg.h"
 #include "ModemPort.h"
+#include "ModemIdentity.h"
+#include "ModemMsdCodec.h"
+#include "cmsis_os.h"
 
 #define MODEM_PLATFORM_PROCESS_PERIOD_MS        100U
 #define MODEM_PLATFORM_JSON_LENGTH               64U
@@ -19,8 +22,12 @@
 #define MODEM_PLATFORM_RX_MAX_LENGTH             750U
 #define MODEM_PLATFORM_REPLY_TYPE_LENGTH          32U
 #define MODEM_PLATFORM_REPLY_LOG_LENGTH           56U
+#define MODEM_PLATFORM_REPLY_TYPE_CURRENT        0x80U
+#define MODEM_PLATFORM_REPLY_TYPE_REGISTER_LEGACY 0x01U
+#define MODEM_PLATFORM_REPLY_TYPE_HEARTBEAT_LEGACY 0x02U
+#define MODEM_PLATFORM_REPLY_TYPE_MSD_LEGACY     0x11U
 #define MODEM_PLATFORM_MSD_PAYLOAD_LENGTH        111U
-#define MODEM_PLATFORM_MSD_FRAME_LENGTH          (MODEM_PLATFORM_MSD_PAYLOAD_LENGTH + 5U)
+#define MODEM_PLATFORM_MSD_FRAME_LENGTH          MODEM_MSD_MAX_FRAME_LENGTH
 
 typedef enum
 {
@@ -73,8 +80,6 @@ typedef struct
     ModemPlatformReceiveStep_t enReceiveStep;
     ModemPlatformHeartbeatStep_t enHeartbeatStep;
     ModemPlatformMsdStep_t enMsdStep;
-    uint8_t u8MsdUploadRequested;
-    uint8_t u8MsdAckReceived;
     uint32_t u32HeartbeatHoldMs;
     char acRegisterCommand[MODEM_PLATFORM_COMMAND_LENGTH];
     char acHeartbeatCommand[MODEM_PLATFORM_COMMAND_LENGTH];
@@ -83,26 +88,49 @@ typedef struct
     char acReceiveDataCommand[MODEM_PLATFORM_COMMAND_LENGTH];
     uint8_t au8RegisterFrame[MODEM_PLATFORM_FRAME_LENGTH];
     uint8_t au8HeartbeatFrame[MODEM_PLATFORM_FRAME_LENGTH];
-    uint8_t au8MsdFrame[MODEM_PLATFORM_MSD_FRAME_LENGTH];
     uint8_t au8ReceiveFrame[MODEM_PLATFORM_RX_MAX_LENGTH];
     uint16_t u16RegisterFrameLength;
     uint16_t u16HeartbeatFrameLength;
-    uint16_t u16MsdFrameLength;
     uint16_t u16ReceiveLength;
     uint16_t u16ReceiveFrameLength;
     uint8_t u8ReceiveLinkId;
-    EcallMsd_t stLastMsd;
+    uint8_t au8StreamFrame[MODEM_MSD_MAX_FRAME_LENGTH];
+    uint16_t u16StreamLength;
+    uint8_t u8RegisterAckReceived;
+    uint8_t u8AwaitingRegisterAck;
+    uint32_t u32RegisterAckStartMs;
 } ModemPlatformRuntime_t;
 
 typedef struct
 {
     ModemPlatformPhase_t enPhase;
     ModemPlatformEvent_t enEvent;
-    uint8_t u8MsdUploadComplete;
 } ModemPlatformStatus_t;
 
+typedef struct
+{
+    uint8_t u8MsdUploadRequested;
+    uint8_t u8MsdUploadComplete;
+    uint8_t u8MsdAckReceived;
+    uint8_t u8AttemptCount;
+    uint8_t u8AwaitingAck;
+    uint8_t au8MsdFrame[MODEM_MSD_MAX_FRAME_LENGTH];
+    uint16_t u16MsdFrameLength;
+    uint32_t u32NextSer;
+    uint32_t u32Ser;
+    uint32_t u32RequestStartMs;
+    uint32_t u32AttemptStartMs;
+    uint32_t u32AckStartMs;
+    EcallMsd_t stLastMsd;
+} ModemPlatformMsdRuntime_t;
+
+static ModemPlatformMsdRuntime_t s_mMsdRun;
+/* One additional frozen event may wait without corrupting a CIPSEND in progress. */
+static ModemPlatformMsdRuntime_t s_mMsdQueued;
 static ModemPlatformRuntime_t s_mPlatRun;
 static ModemPlatformStatus_t s_mPlatSts;
+
+static uint8_t ModemPlatform_IsRetryDue(void);
 
 /*******************************************************
   * Name    :ModemPlatform_EnterFailure
@@ -212,104 +240,22 @@ static uint8_t ModemPlatform_PrepareHeartbeatFrame(void)
 }
 
 /*******************************************************
-  * Name    :ModemPlatform_PackU32Be
-  * Author  :LoH
-  * Function:Store one unsigned 32-bit value in big-endian byte order.
-  * Version :V1.0.0
-  * Data    :2026.08.28
-*******************************************************/
-static void ModemPlatform_PackU32Be(uint8_t *pu8Buffer, uint32_t u32Value)
-{
-    pu8Buffer[0] = (uint8_t)(u32Value >> 24U);
-    pu8Buffer[1] = (uint8_t)(u32Value >> 16U);
-    pu8Buffer[2] = (uint8_t)(u32Value >> 8U);
-    pu8Buffer[3] = (uint8_t)u32Value;
-}
-
-/*******************************************************
-  * Name    :ModemPlatform_E7ToAecsRaw
-  * Author  :LoH
-  * Function:Convert signed degrees times 1e7 to AECS degrees times 3600000.
-  * Version :V1.0.0
-  * Data    :2026.08.29
-*******************************************************/
-static int32_t ModemPlatform_E7ToAecsRaw(int32_t i32CoordinateE7)
-{
-    int64_t i64Scaled = (int64_t)i32CoordinateE7 * 9;
-
-    if (i64Scaled >= 0)
-    {
-        return (int32_t)((i64Scaled + 12) / 25);
-    }
-    return (int32_t)(-(((-i64Scaled) + 12) / 25));
-}
-
-/*******************************************************
-  * Name    :ModemPlatform_GetTriggerType
-  * Author  :LoH
-  * Function:Convert internal trigger source bits to the AECS manual or automatic MSD enum.
-  * Version :V1.0.0
-  * Data    :2026.09.06
-*******************************************************/
-static uint8_t ModemPlatform_GetTriggerType(uint8_t u8TriggerMask)
-{
-    if ((u8TriggerMask & (ECALL_TRIGGER_MASK_AUTO | ECALL_TRIGGER_MASK_CAN)) != 0U)
-    {
-        return 1U;
-    }
-
-    return 0U;
-}
-
-/*******************************************************
   * Name    :ModemPlatform_PrepareMsdFrame
   * Author  :LoH
-  * Function:Build the reference-compatible candidate 111-byte MSD platform frame.
+  * Function:Prepare CIPSEND for the immutable standard MSD and optional V0.2 extension.
   * Version :V1.0.0
-  * Data    :2026.09.06
+  * Data    :2026.11.14
 *******************************************************/
 static uint8_t ModemPlatform_PrepareMsdFrame(void)
 {
     int i32CommandLength;
-    uint8_t *pu8Payload;
-    uint8_t u8Index;
-
-    (void)memset(s_mPlatRun.au8MsdFrame, 0, sizeof(s_mPlatRun.au8MsdFrame));
-    s_mPlatRun.au8MsdFrame[0] = MODEM_PLATFORM_MSG_MSD;
-    ModemPlatform_PackU32Be(&s_mPlatRun.au8MsdFrame[1], MODEM_PLATFORM_MSD_PAYLOAD_LENGTH);
-    pu8Payload = &s_mPlatRun.au8MsdFrame[5];
-    pu8Payload[0] = MODEM_PLATFORM_MSD_VERSION;
-    pu8Payload[1] = MODEM_PLATFORM_MSD_IDENTIFIER;
-    pu8Payload[2] = ModemPlatform_GetTriggerType(s_mPlatRun.stLastMsd.trigger_mask);
-    pu8Payload[3] = MODEM_PLATFORM_MSD_TEST_CALL;
-    pu8Payload[4] = MODEM_PLATFORM_MSD_VEHICLE_TYPE;
-    (void)memcpy(&pu8Payload[5], MODEM_PLATFORM_TEST_VIN, MODEM_PLATFORM_MSD_VIN_LENGTH);
-    pu8Payload[22] = MODEM_PLATFORM_MSD_POWER_TYPE;
-    ModemPlatform_PackU32Be(&pu8Payload[23], s_mPlatRun.stLastMsd.utc_seconds);
-    ModemPlatform_PackU32Be(&pu8Payload[27],
-                            (uint32_t)ModemPlatform_E7ToAecsRaw(s_mPlatRun.stLastMsd.longitude_e7));
-    ModemPlatform_PackU32Be(&pu8Payload[31],
-                            (uint32_t)ModemPlatform_E7ToAecsRaw(s_mPlatRun.stLastMsd.latitude_e7));
-    for (u8Index = 0U; u8Index < ECALL_GNSS_HISTORY_COUNT; u8Index++)
+    if (s_mMsdRun.u16MsdFrameLength == 0U)
     {
-        ModemPlatform_PackU32Be(&pu8Payload[35U + ((uint16_t)u8Index * 8U)],
-                                (uint32_t)ModemPlatform_E7ToAecsRaw(
-                                    s_mPlatRun.stLastMsd.history_longitude_e7[u8Index]));
-        ModemPlatform_PackU32Be(&pu8Payload[39U + ((uint16_t)u8Index * 8U)],
-                                (uint32_t)ModemPlatform_E7ToAecsRaw(
-                                    s_mPlatRun.stLastMsd.history_latitude_e7[u8Index]));
+        return 0U;
     }
-    pu8Payload[107] = s_mPlatRun.stLastMsd.delta_v_longitudinal_raw;
-    pu8Payload[108] = s_mPlatRun.stLastMsd.delta_v_lateral_raw;
-    pu8Payload[109] = s_mPlatRun.stLastMsd.occupants;
-    pu8Payload[110] = s_mPlatRun.stLastMsd.rollover;
-    s_mPlatRun.u16MsdFrameLength = MODEM_PLATFORM_MSD_FRAME_LENGTH;
-
     i32CommandLength = snprintf(s_mPlatRun.acMsdCommand, sizeof(s_mPlatRun.acMsdCommand),
-                                MODEM_AT_CMD_TCP_SEND_FORMAT, MODEM_PLATFORM_LINK_ID,
-                                s_mPlatRun.u16MsdFrameLength);
-    return ((i32CommandLength > 0)
-            && ((uint32_t)i32CommandLength < sizeof(s_mPlatRun.acMsdCommand))) ? 1U : 0U;
+                                MODEM_AT_CMD_TCP_SEND_FORMAT, MODEM_PLATFORM_LINK_ID, s_mMsdRun.u16MsdFrameLength);
+    return ((i32CommandLength > 0) && ((uint32_t)i32CommandLength < sizeof(s_mPlatRun.acMsdCommand))) ? 1U : 0U;
 }
 
 /*******************************************************
@@ -317,7 +263,7 @@ static uint8_t ModemPlatform_PrepareMsdFrame(void)
   * Author  :LoH
   * Function:Read the buffered-data length returned by CIPRXGET mode four.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
 static uint8_t ModemPlatform_ParseReceiveLength(const char *pcResponse, uint8_t u8LinkId, uint16_t *pu16Length)
 {
@@ -328,12 +274,12 @@ static uint8_t ModemPlatform_ParseReceiveLength(const char *pcResponse, uint8_t 
         || (pu16Length == 0)
         || (sscanf(pcResponse, "+CIPRXGET: 4,%u,%u", &u32ResponseLinkId, &u32Length) != 2)
         || (u32ResponseLinkId != u8LinkId)
-        || (u32Length > MODEM_PLATFORM_RX_MAX_LENGTH))
+)
     {
         return 0U;
     }
 
-    *pu16Length = (uint16_t)u32Length;
+    *pu16Length = (u32Length > MODEM_PLATFORM_RX_MAX_LENGTH) ? MODEM_PLATFORM_RX_MAX_LENGTH : (uint16_t)u32Length;
     return 1U;
 }
 
@@ -401,88 +347,6 @@ static uint8_t ModemPlatform_HexToBytes(const char *pcHex, uint16_t u16Length, u
 }
 
 /*******************************************************
-  * Name    :ModemPlatform_IsFrameValid
-  * Author  :LoH
-  * Function:Verify the candidate AECS type-and-length frame header.
-  * Version :V1.0.0
-  * Data    :2026.08.28
-*******************************************************/
-static uint8_t ModemPlatform_IsFrameValid(const uint8_t *pu8Frame, uint16_t u16Length)
-{
-    uint32_t u32PayloadLength;
-
-    if ((pu8Frame == 0) || (u16Length < 5U))
-    {
-        return 0U;
-    }
-
-    u32PayloadLength = ((uint32_t)pu8Frame[1] << 24U)
-                       | ((uint32_t)pu8Frame[2] << 16U)
-                       | ((uint32_t)pu8Frame[3] << 8U)
-                       | (uint32_t)pu8Frame[4];
-    return ((u32PayloadLength + 5U) == u16Length) ? 1U : 0U;
-}
-
-/*******************************************************
-  * Name    :ModemPlatform_ExtractReplyType
-  * Author  :LoH
-  * Function:Extract the bounded JSON type value from a verified AECS frame.
-  * Version :V1.0.0
-  * Data    :2026.08.28
-*******************************************************/
-static uint8_t ModemPlatform_ExtractReplyType(const uint8_t *pu8Frame, uint16_t u16FrameLength,
-                                              char *pcType, uint16_t u16TypeLength)
-{
-    static const char cTypeKey[] = "\"type\":\"";
-    uint16_t u16PayloadLength;
-    uint16_t u16Index;
-    uint16_t u16TypeIndex;
-    uint16_t u16TypeStartIndex;
-
-    if ((pu8Frame == 0) || (pcType == 0) || (u16FrameLength < 5U) || (u16TypeLength < 2U))
-    {
-        return 0U;
-    }
-
-    pcType[0] = '\0';
-    u16PayloadLength = (uint16_t)(u16FrameLength - 5U);
-    for (u16Index = 0U; (uint16_t)(u16Index + sizeof(cTypeKey) - 1U) <= u16PayloadLength; u16Index++)
-    {
-        if (memcmp(&pu8Frame[5U + u16Index], cTypeKey, sizeof(cTypeKey) - 1U) == 0)
-        {
-            u16TypeStartIndex = (uint16_t)(u16Index + sizeof(cTypeKey) - 1U);
-            for (u16TypeIndex = 0U; (uint16_t)(u16TypeStartIndex + u16TypeIndex) < u16PayloadLength; u16TypeIndex++)
-            {
-                if (pu8Frame[5U + u16TypeStartIndex + u16TypeIndex] == '"')
-                {
-                    if (u16TypeIndex == 0U)
-                    {
-                        return 0U;
-                    }
-
-                    pcType[u16TypeIndex] = '\0';
-                    return 1U;
-                }
-
-                if ((u16TypeIndex >= (uint16_t)(u16TypeLength - 1U))
-                    || (pu8Frame[5U + u16TypeStartIndex + u16TypeIndex] < 0x20U)
-                    || (pu8Frame[5U + u16TypeStartIndex + u16TypeIndex] > 0x7EU)
-                    || (pu8Frame[5U + u16TypeStartIndex + u16TypeIndex] == '\\'))
-                {
-                    return 0U;
-                }
-
-                pcType[u16TypeIndex] = (char)pu8Frame[5U + u16TypeStartIndex + u16TypeIndex];
-            }
-
-            return 0U;
-        }
-    }
-
-    return 0U;
-}
-
-/*******************************************************
   * Name    :ModemPlatform_LogReplyType
   * Author  :LoH
   * Function:Report the parsed platform reply type without logging the complete payload.
@@ -514,7 +378,7 @@ static void ModemPlatform_LogReplyType(const char *pcType)
 /*******************************************************
   * Name    :ModemPlatform_ProcessRegistering
   * Author  :LoH
-  * Function:Send the candidate AECS registration frame and verify CIPSEND lengths.
+  * Function:Send registration, verify CIPSEND lengths and then wait for register_ack.
   * Version :V1.0.0
   * Data    :2026.08.28
 *******************************************************/
@@ -587,9 +451,11 @@ static void ModemPlatform_ProcessRegistering(void)
             {
                 if (ModemPlatform_IsDataSendComplete(ModemPort_GetLastMatchedResponse(), s_mPlatRun.u16RegisterFrameLength) != 0U)
                 {
-                    HMI_LOG_MODEM("PLATFORM_REGISTERED\r\n");
+                    HMI_LOG_MODEM("PLATFORM_REGISTER_SENT_WAIT_ACK\r\n");
                     s_mPlatSts.enPhase = MODEM_PLATFORM_PHASE_ONLINE;
-                    s_mPlatSts.enEvent = MODEM_PLATFORM_EVENT_REGISTERED;
+                    s_mPlatRun.u8RegisterAckReceived = 0U;
+                    s_mPlatRun.u8AwaitingRegisterAck = 1U;
+                    s_mPlatRun.u32RegisterAckStartMs = osKernelSysTick();
                 }
                 else
                 {
@@ -615,13 +481,16 @@ static void ModemPlatform_ProcessRegistering(void)
   * Author  :LoH
   * Function:Send periodic heartbeat without colliding with receive, MSD or sleep work.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
 static void ModemPlatform_ProcessHeartbeat(uint8_t u8HeartbeatEnabled)
 {
     if ((s_mPlatRun.enReceiveStep != MODEM_PLATFORM_RX_STEP_IDLE)
-        || (s_mPlatRun.u8MsdUploadRequested != 0U)
-        || (u8HeartbeatEnabled == 0U))
+        || ((s_mPlatRun.enHeartbeatStep == MODEM_PLATFORM_HEARTBEAT_STEP_WAIT)
+            && ((u8HeartbeatEnabled == 0U)
+                || ((s_mMsdRun.u8MsdUploadRequested != 0U)
+                    && (s_mMsdRun.u8MsdUploadComplete == 0U)
+                    && (ModemPlatform_IsRetryDue() != 0U)))))
     {
         return;
     }
@@ -729,15 +598,162 @@ static void ModemPlatform_ProcessHeartbeat(uint8_t u8HeartbeatEnabled)
 }
 
 /*******************************************************
+  * Name    :ModemPlatform_IsRetryDue
+  * Author  :LoH
+  * Function:Use elapsed wall time and retain one frozen message across all transport retries.
+  * Version :V1.0.0
+  * Data    :2026.11.14
+*******************************************************/
+static uint8_t ModemPlatform_IsRetryDue(void)
+{
+    uint32_t u32Delay = (s_mMsdRun.u8AttemptCount <= 1U) ? MODEM_MSD_FIRST_RETRY_MS : MODEM_MSD_LATER_RETRY_MS;
+    return ((s_mMsdRun.u8AttemptCount == 0U)
+        || ((uint32_t)(osKernelSysTick() - s_mMsdRun.u32AttemptStartMs) >= u32Delay)) ? 1U : 0U;
+}
+
+/*******************************************************
+  * Name    :ModemPlatform_IsReplyFrameTypeSupported
+  * Author  :LoH
+  * Function:Accept the current unified reply type and the deployed legacy reply types.
+  * Version :V1.0.0
+  * Data    :2026.11.16
+*******************************************************/
+static uint8_t ModemPlatform_IsReplyFrameTypeSupported(uint8_t u8FrameType)
+{
+    return ((u8FrameType == MODEM_PLATFORM_REPLY_TYPE_CURRENT)
+        || (u8FrameType == MODEM_PLATFORM_REPLY_TYPE_REGISTER_LEGACY)
+        || (u8FrameType == MODEM_PLATFORM_REPLY_TYPE_HEARTBEAT_LEGACY)
+        || (u8FrameType == MODEM_PLATFORM_REPLY_TYPE_MSD_LEGACY)) ? 1U : 0U;
+}
+
+/*******************************************************
+  * Name    :ModemPlatform_IsReplyTypeMatchingFrame
+  * Author  :LoH
+  * Function:Bind each legacy frame type to its JSON reply type while allowing unified replies.
+  * Version :V1.0.0
+  * Data    :2026.11.16
+*******************************************************/
+static uint8_t ModemPlatform_IsReplyTypeMatchingFrame(uint8_t u8FrameType, const char *pcType)
+{
+    if (pcType == 0)
+    {
+        return 0U;
+    }
+    if (u8FrameType == MODEM_PLATFORM_REPLY_TYPE_CURRENT)
+    {
+        return 1U;
+    }
+    if (u8FrameType == MODEM_PLATFORM_REPLY_TYPE_REGISTER_LEGACY)
+    {
+        return (strcmp(pcType, "register_ack") == 0) ? 1U : 0U;
+    }
+    if (u8FrameType == MODEM_PLATFORM_REPLY_TYPE_HEARTBEAT_LEGACY)
+    {
+        return (strcmp(pcType, "heartbeat_ack") == 0) ? 1U : 0U;
+    }
+    if (u8FrameType == MODEM_PLATFORM_REPLY_TYPE_MSD_LEGACY)
+    {
+        return (strcmp(pcType, "msd_ack") == 0) ? 1U : 0U;
+    }
+    return 0U;
+}
+
+/*******************************************************
+  * Name    :ModemPlatform_ConsumeStream
+  * Author  :LoH
+  * Function:Reassemble bounded TCP frames before validating correlated MSD receipts.
+  * Version :V1.0.0
+  * Data    :2026.11.14
+*******************************************************/
+static uint8_t ModemPlatform_ConsumeStream(const uint8_t *pu8Bytes, uint16_t u16Length)
+{
+    uint16_t u16Index;
+    uint32_t u32PayloadLength;
+    char acType[MODEM_PLATFORM_REPLY_TYPE_LENGTH];
+    for (u16Index = 0U; u16Index < u16Length; u16Index++)
+    {
+        if (s_mPlatRun.u16StreamLength >= sizeof(s_mPlatRun.au8StreamFrame))
+        {
+            return 0U;
+        }
+        s_mPlatRun.au8StreamFrame[s_mPlatRun.u16StreamLength++] = pu8Bytes[u16Index];
+        if (s_mPlatRun.u16StreamLength < 5U)
+        {
+            continue;
+        }
+        u32PayloadLength = ((uint32_t)s_mPlatRun.au8StreamFrame[1] << 24U)
+            | ((uint32_t)s_mPlatRun.au8StreamFrame[2] << 16U)
+            | ((uint32_t)s_mPlatRun.au8StreamFrame[3] << 8U) | s_mPlatRun.au8StreamFrame[4];
+        if ((ModemPlatform_IsReplyFrameTypeSupported(s_mPlatRun.au8StreamFrame[0]) == 0U)
+            || (u32PayloadLength > MODEM_MSD_MAX_PAYLOAD_LENGTH))
+        {
+            return 0U;
+        }
+        if (s_mPlatRun.u16StreamLength == (u32PayloadLength + 5U))
+        {
+            if (ModemMsdCodec_ReadReplyType(&s_mPlatRun.au8StreamFrame[5], (uint16_t)u32PayloadLength, acType, sizeof(acType)) != 0U)
+            {
+                if (ModemPlatform_IsReplyTypeMatchingFrame(s_mPlatRun.au8StreamFrame[0], acType) != 0U)
+                {
+                    ModemPlatform_LogReplyType(acType);
+                    if (strcmp(acType, "register_ack") == 0)
+                    {
+                        if ((s_mPlatRun.u8AwaitingRegisterAck != 0U)
+                            && (ModemMsdCodec_IsMatchingControlAck(&s_mPlatRun.au8StreamFrame[5],
+                                (uint16_t)u32PayloadLength, "register_ack") != 0U))
+                        {
+                            s_mPlatRun.u8AwaitingRegisterAck = 0U;
+                            s_mPlatRun.u8RegisterAckReceived = 1U;
+                            s_mPlatSts.enEvent = MODEM_PLATFORM_EVENT_REGISTERED;
+                            HMI_LOG_MODEM("REGISTER_ACK_CONFIRMED\r\n");
+                        }
+                        else
+                        {
+                            HMI_LOG_MODEM("REGISTER_ACK_REJECTED\r\n");
+                        }
+                    }
+                    else if ((strcmp(acType, "msd_ack") == 0) && (s_mMsdRun.u8MsdUploadRequested != 0U)
+                        && (s_mMsdRun.u8AttemptCount != 0U))
+                    {
+                        if (ModemMsdCodec_IsMatchingAck(&s_mPlatRun.au8StreamFrame[5], (uint16_t)u32PayloadLength,
+                            s_mMsdRun.u32Ser, 1U, s_mMsdRun.stLastMsd.utc_seconds, MODEM_PLATFORM_MSD_EXTENSION_ENABLED) != 0U)
+                        {
+                            s_mMsdRun.u8MsdAckReceived = 1U;
+                            s_mMsdRun.u8MsdUploadRequested = 0U;
+                            s_mMsdRun.u8AwaitingAck = 0U;
+                            s_mPlatSts.enEvent = MODEM_PLATFORM_EVENT_MSD_UPLOADED;
+                            HMI_LOG_MODEM("MSD_ACK_CONFIRMED\r\n");
+                        }
+                        else
+                        {
+                            HMI_LOG_MODEM("MSD_ACK_REJECTED\r\n");
+                        }
+                    }
+                }
+                else
+                {
+                    HMI_LOG_MODEM("PLATFORM_RX_TYPE_MISMATCH\r\n");
+                }
+            }
+            else
+            {
+                HMI_LOG_MODEM("PLATFORM_RX_TYPE_INVALID\r\n");
+            }
+            s_mPlatRun.u16StreamLength = 0U;
+        }
+    }
+    return 1U;
+}
+
+/*******************************************************
   * Name    :ModemPlatform_ProcessOnline
   * Author  :LoH
   * Function:Retrieve buffered platform frames and schedule heartbeat or MSD work.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
 static void ModemPlatform_ProcessOnline(uint8_t u8HeartbeatEnabled)
 {
-    char acPlatformReplyType[MODEM_PLATFORM_REPLY_TYPE_LENGTH];
     int i32CommandLength;
 
     ModemPlatform_ProcessHeartbeat(u8HeartbeatEnabled);
@@ -835,39 +851,17 @@ static void ModemPlatform_ProcessOnline(uint8_t u8HeartbeatEnabled)
             }
             else if (ModemPort_IsIdle() != 0U)
             {
-                if ((ModemPlatform_HexToBytes(ModemPort_GetLastDataLine(), s_mPlatRun.u16ReceiveLength,
-                                              s_mPlatRun.au8ReceiveFrame) != 0U)
-                    && (ModemPlatform_IsFrameValid(s_mPlatRun.au8ReceiveFrame,
-                                                   s_mPlatRun.u16ReceiveLength) != 0U))
+                if ((ModemPlatform_HexToBytes(ModemPort_GetLastDataLine(), s_mPlatRun.u16ReceiveLength, s_mPlatRun.au8ReceiveFrame) != 0U)
+                    && (ModemPlatform_ConsumeStream(s_mPlatRun.au8ReceiveFrame, s_mPlatRun.u16ReceiveLength) != 0U))
                 {
-                    s_mPlatRun.u16ReceiveFrameLength = s_mPlatRun.u16ReceiveLength;
-                    HMI_LOG_MODEM("PLATFORM_RX_FRAME_READY\r\n");
-                    if (ModemPlatform_ExtractReplyType(s_mPlatRun.au8ReceiveFrame,
-                                                       s_mPlatRun.u16ReceiveFrameLength,
-                                                       acPlatformReplyType,
-                                                       sizeof(acPlatformReplyType)) != 0U)
-                    {
-                        ModemPlatform_LogReplyType(acPlatformReplyType);
-                        if ((s_mPlatSts.u8MsdUploadComplete != 0U)
-                            && (s_mPlatRun.u8MsdAckReceived == 0U)
-                            && (strcmp(acPlatformReplyType, "msd_ack") == 0))
-                        {
-                            s_mPlatRun.u8MsdAckReceived = 1U;
-                            s_mPlatRun.u8MsdUploadRequested = 0U;
-                            s_mPlatSts.enEvent = MODEM_PLATFORM_EVENT_MSD_UPLOADED;
-                            HMI_LOG_MODEM("MSD_ACK_CALL_START\r\n");
-                        }
-                    }
-                    else
-                    {
-                        HMI_LOG_MODEM("PLATFORM_RX_TYPE_INVALID\r\n");
-                    }
+                    /* Query the remaining modem buffer even when no new receive URC is emitted. */
+                    s_mPlatRun.enReceiveStep = MODEM_PLATFORM_RX_STEP_LENGTH_QUEUE;
                 }
                 else
                 {
                     HMI_LOG_MODEM("PLATFORM_RX_FRAME_INVALID\r\n");
+                    ModemPlatform_EnterFailure();
                 }
-                s_mPlatRun.enReceiveStep = MODEM_PLATFORM_RX_STEP_IDLE;
             }
             else
             {
@@ -886,8 +880,11 @@ static void ModemPlatform_ProcessOnline(uint8_t u8HeartbeatEnabled)
         return;
     }
 
-    if ((s_mPlatRun.u8MsdUploadRequested != 0U)
-        && (s_mPlatSts.u8MsdUploadComplete == 0U)
+    if ((s_mMsdRun.u8MsdUploadRequested != 0U)
+        && (s_mMsdRun.u8MsdUploadComplete == 0U)
+        && (s_mPlatRun.u8RegisterAckReceived != 0U)
+        && (ModemPlatform_IsRetryDue() != 0U)
+        && (s_mPlatRun.enHeartbeatStep == MODEM_PLATFORM_HEARTBEAT_STEP_WAIT)
         && (s_mPlatRun.enReceiveStep == MODEM_PLATFORM_RX_STEP_IDLE)
         && (ModemPort_IsIdle() != 0U))
     {
@@ -901,7 +898,7 @@ static void ModemPlatform_ProcessOnline(uint8_t u8HeartbeatEnabled)
   * Author  :LoH
   * Function:Upload one reference-compatible MSD frame and verify CIPSEND lengths.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
 static void ModemPlatform_ProcessMsdUploading(void)
 {
@@ -910,6 +907,11 @@ static void ModemPlatform_ProcessMsdUploading(void)
         case MODEM_PLATFORM_MSD_STEP_PREPARE:
             if (ModemPlatform_PrepareMsdFrame() != 0U)
             {
+                s_mMsdRun.u32AttemptStartMs = osKernelSysTick();
+                if (s_mMsdRun.u8AttemptCount < 255U)
+                {
+                    s_mMsdRun.u8AttemptCount++;
+                }
                 HMI_LOG_MODEM("MSD_UPLOAD_START\r\n");
                 s_mPlatRun.enMsdStep = MODEM_PLATFORM_MSD_STEP_QUEUE;
             }
@@ -951,8 +953,8 @@ static void ModemPlatform_ProcessMsdUploading(void)
             break;
 
         case MODEM_PLATFORM_MSD_STEP_SEND:
-            if (ModemPort_SendData(s_mPlatRun.au8MsdFrame, s_mPlatRun.u16MsdFrameLength,
-                                   MODEM_AT_RSP_SEND, MODEM_AT_CFG_SEND_RESULT_TIMEOUT_MS) != 0U)
+            if (ModemPort_SendData(s_mMsdRun.au8MsdFrame, s_mMsdRun.u16MsdFrameLength,
+                                   MODEM_AT_RSP_SEND, MODEM_AT_CFG_MSD_SEND_RESULT_TIMEOUT_MS) != 0U)
             {
                 s_mPlatRun.enMsdStep = MODEM_PLATFORM_MSD_STEP_WAIT_RESULT;
             }
@@ -971,9 +973,11 @@ static void ModemPlatform_ProcessMsdUploading(void)
             }
             else if (ModemPort_IsIdle() != 0U)
             {
-                if (ModemPlatform_IsDataSendComplete(ModemPort_GetLastMatchedResponse(), s_mPlatRun.u16MsdFrameLength) != 0U)
+                if (ModemPlatform_IsDataSendComplete(ModemPort_GetLastMatchedResponse(), s_mMsdRun.u16MsdFrameLength) != 0U)
                 {
-                    s_mPlatSts.u8MsdUploadComplete = 1U;
+                    s_mMsdRun.u8MsdUploadComplete = 1U;
+                    s_mMsdRun.u8AwaitingAck = 1U;
+                    s_mMsdRun.u32AckStartMs = osKernelSysTick();
                     s_mPlatSts.enPhase = MODEM_PLATFORM_PHASE_ONLINE;
                     HMI_LOG_MODEM("MSD_UPLOADED_WAIT_ACK\r\n");
                 }
@@ -1001,11 +1005,14 @@ static void ModemPlatform_ProcessMsdUploading(void)
   * Author  :LoH
   * Function:Initialize private platform runtime and status data.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
 void ModemPlatform_Init(void)
 {
     (void)memset(&s_mPlatRun, 0, sizeof(s_mPlatRun));
+    (void)memset(&s_mMsdRun, 0, sizeof(s_mMsdRun));
+    (void)memset(&s_mMsdQueued, 0, sizeof(s_mMsdQueued));
+    s_mMsdRun.u32NextSer = 1U;
     (void)memset(&s_mPlatSts, 0, sizeof(s_mPlatSts));
     s_mPlatRun.enRegisterStep = MODEM_PLATFORM_REGISTER_STEP_PREPARE;
     s_mPlatRun.enReceiveStep = MODEM_PLATFORM_RX_STEP_IDLE;
@@ -1020,19 +1027,17 @@ void ModemPlatform_Init(void)
   * Author  :LoH
   * Function:Stop active platform work while preserving a pending emergency MSD.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
 void ModemPlatform_Reset(void)
 {
-    EcallMsd_t stPendingMsd = s_mPlatRun.stLastMsd;
-    uint8_t u8MsdUploadRequested = s_mPlatRun.u8MsdUploadRequested;
-
-    ModemPlatform_Init();
-    if (u8MsdUploadRequested != 0U)
-    {
-        s_mPlatRun.stLastMsd = stPendingMsd;
-        s_mPlatRun.u8MsdUploadRequested = 1U;
-    }
+    (void)memset(&s_mPlatRun, 0, sizeof(s_mPlatRun));
+    (void)memset(&s_mPlatSts, 0, sizeof(s_mPlatSts));
+    s_mPlatRun.enRegisterStep = MODEM_PLATFORM_REGISTER_STEP_PREPARE;
+    s_mPlatRun.enMsdStep = MODEM_PLATFORM_MSD_STEP_PREPARE;
+    s_mMsdRun.u8MsdUploadComplete = 0U;
+    s_mMsdRun.u8AwaitingAck = 0U;
+    /* Frozen frame, sequence and retry start survive all transport reconnects. */
 }
 
 /*******************************************************
@@ -1048,6 +1053,9 @@ void ModemPlatform_Start(void)
     s_mPlatRun.enReceiveStep = MODEM_PLATFORM_RX_STEP_IDLE;
     s_mPlatRun.enHeartbeatStep = MODEM_PLATFORM_HEARTBEAT_STEP_WAIT;
     s_mPlatRun.u32HeartbeatHoldMs = 0U;
+    s_mPlatRun.u8RegisterAckReceived = 0U;
+    s_mPlatRun.u8AwaitingRegisterAck = 0U;
+    s_mPlatRun.u32RegisterAckStartMs = 0U;
     s_mPlatSts.enPhase = MODEM_PLATFORM_PHASE_REGISTERING;
     s_mPlatSts.enEvent = MODEM_PLATFORM_EVENT_NONE;
 }
@@ -1057,17 +1065,37 @@ void ModemPlatform_Start(void)
   * Author  :LoH
   * Function:Latch one frozen MSD for upload after registration or active receive work.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
 void ModemPlatform_RequestMsdUpload(const EcallMsd_t *pstMsd)
 {
+    ModemIdentitySnapshot_t stIdentity;
+    ModemPlatformMsdRuntime_t *pstTarget;
+    uint32_t u32NextSer = s_mMsdRun.u32NextSer;
     if (pstMsd != 0)
     {
-        s_mPlatRun.stLastMsd = *pstMsd;
-        s_mPlatRun.u8MsdUploadRequested = 1U;
-        s_mPlatRun.u8MsdAckReceived = 0U;
-        s_mPlatRun.enMsdStep = MODEM_PLATFORM_MSD_STEP_PREPARE;
-        s_mPlatSts.u8MsdUploadComplete = 0U;
+        if ((s_mMsdRun.u8MsdUploadRequested != 0U) || (s_mPlatSts.enPhase == MODEM_PLATFORM_PHASE_MSD_UPLOADING))
+        {
+            pstTarget = &s_mMsdQueued;
+            if (s_mMsdQueued.u8MsdUploadRequested != 0U)
+            {
+                HMI_LOG_MODEM("MSD_WAITING_EVENT_REPLACED\r\n");
+            }
+        }
+        else
+        {
+            pstTarget = &s_mMsdRun;
+            s_mPlatRun.enMsdStep = MODEM_PLATFORM_MSD_STEP_PREPARE;
+        }
+        (void)memset(pstTarget, 0, sizeof(*pstTarget));
+        pstTarget->u32Ser = u32NextSer;
+        pstTarget->stLastMsd = *pstMsd;
+        ModemIdentity_GetSnapshot(&stIdentity);
+        pstTarget->u16MsdFrameLength = ModemMsdCodec_BuildFrame(pstMsd, &stIdentity, u32NextSer,
+            1U, MODEM_PLATFORM_MSD_EXTENSION_ENABLED, pstTarget->au8MsdFrame, sizeof(pstTarget->au8MsdFrame));
+        pstTarget->u8MsdUploadRequested = (pstTarget->u16MsdFrameLength != 0U) ? 1U : 0U;
+        pstTarget->u32RequestStartMs = osKernelSysTick();
+        s_mMsdRun.u32NextSer = (u32NextSer == UINT32_MAX) ? 1U : (u32NextSer + 1U);
     }
 }
 
@@ -1121,14 +1149,14 @@ uint8_t ModemPlatform_IsOnline(void)
   * Author  :LoH
   * Function:Return whether no receive, heartbeat or emergency upload owns the AT port.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.11.14
 *******************************************************/
 uint8_t ModemPlatform_IsBackgroundAllowed(void)
 {
     return ((s_mPlatSts.enPhase == MODEM_PLATFORM_PHASE_ONLINE)
             && (s_mPlatRun.enReceiveStep == MODEM_PLATFORM_RX_STEP_IDLE)
             && (s_mPlatRun.enHeartbeatStep == MODEM_PLATFORM_HEARTBEAT_STEP_WAIT)
-            && (s_mPlatRun.u8MsdUploadRequested == 0U)) ? 1U : 0U;
+            && (ModemPlatform_HasPendingMsd() == 0U)) ? 1U : 0U;
 }
 
 /*******************************************************
@@ -1143,4 +1171,96 @@ ModemPlatformEvent_t ModemPlatform_TakeEvent(void)
     ModemPlatformEvent_t enEvent = s_mPlatSts.enEvent;
     s_mPlatSts.enEvent = MODEM_PLATFORM_EVENT_NONE;
     return enEvent;
+}
+
+/*******************************************************
+  * Name    :ModemPlatform_Tick
+  * Author  :LoH
+  * Function:Advance ACK and overall attempt windows even when another workflow owns the port.
+  * Version :V1.0.0
+  * Data    :2026.11.14
+*******************************************************/
+void ModemPlatform_Tick(void)
+{
+    if ((s_mPlatRun.u8AwaitingRegisterAck != 0U)
+        && ((uint32_t)(osKernelSysTick() - s_mPlatRun.u32RegisterAckStartMs)
+            >= MODEM_PLATFORM_REGISTER_ACK_TIMEOUT_MS))
+    {
+        s_mPlatRun.u8AwaitingRegisterAck = 0U;
+        HMI_LOG_MODEM("REGISTER_ACK_TIMEOUT\r\n");
+        ModemPlatform_EnterFailure();
+    }
+
+    if ((s_mMsdRun.u8MsdUploadRequested == 0U)
+        && (s_mMsdQueued.u8MsdUploadRequested != 0U)
+        && (s_mPlatSts.enPhase != MODEM_PLATFORM_PHASE_MSD_UPLOADING))
+    {
+        uint32_t u32NextSer = s_mMsdRun.u32NextSer;
+        s_mMsdRun = s_mMsdQueued;
+        s_mMsdRun.u32NextSer = u32NextSer;
+        (void)memset(&s_mMsdQueued, 0, sizeof(s_mMsdQueued));
+        s_mPlatRun.enMsdStep = MODEM_PLATFORM_MSD_STEP_PREPARE;
+    }
+    if (s_mMsdRun.u8MsdUploadRequested == 0U)
+    {
+        return;
+    }
+    if ((uint32_t)(osKernelSysTick() - s_mMsdRun.u32RequestStartMs) >= MODEM_MSD_RETRY_WINDOW_MS)
+    {
+        s_mMsdRun.u8MsdUploadRequested = 0U;
+        s_mMsdRun.u8AwaitingAck = 0U;
+        HMI_LOG_MODEM("MSD_RETRY_WINDOW_EXPIRED\r\n");
+    }
+    else if ((s_mMsdRun.u8AwaitingAck != 0U)
+        && ((uint32_t)(osKernelSysTick() - s_mMsdRun.u32AckStartMs) >= MODEM_MSD_ACK_TIMEOUT_MS))
+    {
+        s_mMsdRun.u8AwaitingAck = 0U;
+        s_mMsdRun.u8MsdUploadComplete = 0U;
+        s_mPlatRun.enMsdStep = MODEM_PLATFORM_MSD_STEP_PREPARE;
+        HMI_LOG_MODEM("MSD_ACK_TIMEOUT_CLOSE\r\n");
+        ModemPlatform_EnterFailure();
+    }
+}
+
+/*******************************************************
+  * Name    :ModemPlatform_HasPendingMsd
+  * Author  :LoH
+  * Function:Keep data attempts independent of the voice session terminal state.
+  * Version :V1.0.0
+  * Data    :2026.11.14
+*******************************************************/
+uint8_t ModemPlatform_HasPendingMsd(void)
+{
+    return ((s_mMsdRun.u8MsdUploadRequested != 0U) || (s_mMsdQueued.u8MsdUploadRequested != 0U)) ? 1U : 0U;
+}
+
+/*******************************************************
+  * Name    :ModemPlatform_IsMsdAttemptDue
+  * Author  :LoH
+  * Function:Return whether a pending frozen MSD is ready for a new TCP session.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+uint8_t ModemPlatform_IsMsdAttemptDue(void)
+{
+    return ((s_mMsdRun.u8MsdUploadRequested != 0U)
+        && (ModemPlatform_IsRetryDue() != 0U)) ? 1U : 0U;
+}
+
+/*******************************************************
+  * Name    :ModemPlatform_CanYieldPort
+  * Author  :LoH
+  * Function:Protect CIPSEND prompt and payload as one indivisible service transaction.
+  * Version :V1.0.0
+  * Data    :2026.11.14
+*******************************************************/
+uint8_t ModemPlatform_CanYieldPort(void)
+{
+    return ((s_mPlatSts.enPhase == MODEM_PLATFORM_PHASE_IDLE)
+        || ((s_mPlatSts.enPhase == MODEM_PLATFORM_PHASE_ONLINE)
+            && (s_mPlatRun.enReceiveStep == MODEM_PLATFORM_RX_STEP_IDLE)
+            && (s_mPlatRun.enHeartbeatStep == MODEM_PLATFORM_HEARTBEAT_STEP_WAIT))
+        || ((s_mPlatSts.enPhase == MODEM_PLATFORM_PHASE_MSD_UPLOADING)
+            && ((s_mPlatRun.enMsdStep == MODEM_PLATFORM_MSD_STEP_PREPARE)
+                || (s_mPlatRun.enMsdStep == MODEM_PLATFORM_MSD_STEP_QUEUE)))) ? 1U : 0U;
 }

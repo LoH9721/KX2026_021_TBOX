@@ -14,6 +14,8 @@
 #include "TaskManager.h"
 #include <string.h>
 
+#define ECALL_TASK_GNSS_WAIT_TIMEOUT_MS 3000U
+
 osMessageQDef(EcallTaskEventQueue, 8U, uint32_t);
 static osMessageQId m_xEcallEventQueue;
 static uint8_t m_u8PendingTriggerMask = 0U;
@@ -105,18 +107,21 @@ static void EcallTask_ProcessPendingTriggers(void)
 /*******************************************************
   * Name    :EcallTask_Entry
   * Author  :LoH
-  * Function:Wait events and drive eCall state machine.
+  * Function:Drive eCall events with a bounded three-second GNSS wait.
   * Version :V1.0.0
-  * Data    :2026.08.26
+  * Data    :2026.11.16
 *******************************************************/
 static void EcallTask_Entry(void const *argument)
 {
     osEvent xEvent;
     EcallMsd_t stMsd;
     uint32_t u32CancelWindowDeadline = 0U;
+    uint32_t u32GnssDeadline = 0U;
     uint32_t u32CurrentTick;
     uint32_t u32WaitMs;
     uint8_t u8CancelWindowTimerActive = 0U;
+    uint8_t u8GnssTimerActive = 0U;
+    uint8_t u8GnssValid;
 
     (void)argument;
     Hmi_ShowTaskStarted("EcallTask");
@@ -140,9 +145,27 @@ static void EcallTask_Entry(void const *argument)
             }
             u32WaitMs = u32CancelWindowDeadline - u32CurrentTick;
         }
+        else if (Ecall_GetState() == ECALL_STATE_WAIT_GNSS)
+        {
+            u32CurrentTick = osKernelSysTick();
+            if (u8GnssTimerActive == 0U)
+            {
+                u32GnssDeadline = u32CurrentTick + ECALL_TASK_GNSS_WAIT_TIMEOUT_MS;
+                u8GnssTimerActive = 1U;
+            }
+            if ((int32_t)(u32GnssDeadline - u32CurrentTick) <= 0)
+            {
+                u8GnssValid = EcallTask_GetMsdSnapshot(&stMsd);
+                Ecall_OnGnssResult(&stMsd, u8GnssValid);
+                u8GnssTimerActive = 0U;
+                continue;
+            }
+            u32WaitMs = u32GnssDeadline - u32CurrentTick;
+        }
         else
         {
             u8CancelWindowTimerActive = 0U;
+            u8GnssTimerActive = 0U;
             u32WaitMs = osWaitForever;
         }
 
@@ -188,8 +211,17 @@ static void EcallTask_Entry(void const *argument)
         }
         else if (xEvent.status == osEventTimeout)
         {
-            Ecall_OnManualCancelTimeout();
-            u8CancelWindowTimerActive = 0U;
+            if (Ecall_GetState() == ECALL_STATE_WAIT_GNSS)
+            {
+                u8GnssValid = EcallTask_GetMsdSnapshot(&stMsd);
+                Ecall_OnGnssResult(&stMsd, u8GnssValid);
+                u8GnssTimerActive = 0U;
+            }
+            else
+            {
+                Ecall_OnManualCancelTimeout();
+                u8CancelWindowTimerActive = 0U;
+            }
         }
     }
 }

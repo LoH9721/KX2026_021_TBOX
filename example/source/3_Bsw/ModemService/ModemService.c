@@ -3,12 +3,13 @@
   * Author  :LoH
   * Function:Modem emergency call service implementation.
   * Version :V1.0.0
-  * Data    :2026.08.27
+  * Data    :2026.11.14
 *******************************************************/
 #include "ModemService.h"
 #include <string.h>
 #include "Hmi.h"
 #include "ModemAudio.h"
+#include "ModemAt_Cfg.h"
 #include "ModemCall.h"
 #include "ModemGnss.h"
 #include "ModemNetwork.h"
@@ -16,16 +17,30 @@
 #include "ModemPower.h"
 #include "ModemPort.h"
 #include "ModemTime.h"
+#include "ModemIdentity.h"
+#include "cmsis_os.h"
+#include "FreeRTOS.h"
+#include "task.h"
 
 #define MODEM_NETWORK_PROCESS_PERIOD_MS     100U
 #define MODEM_NETWORK_SLEEP_HOLD_MS         300000UL
 
 typedef struct
 {
+    /* EcallTask writes this mailbox under a critical section; ModemTask consumes it. */
+    volatile uint8_t u8NewEmergencyRequested;
+    EcallMsd_t stRequestedMsd;
+    uint8_t u8NetworkRetryWaiting;
+    uint32_t u32NetworkRetryStartMs;
+    uint32_t u32EmergencyStartMs;
     uint8_t u8EmergencyRequestPending;
     uint8_t u8NetworkOnlineRequested;
     uint8_t u8NetworkSleepRequested;
     uint32_t u32NetworkSleepHoldMs;
+    uint8_t u8TcpClosePending;
+    uint8_t u8TcpCloseStarted;
+    uint32_t u32TcpCloseStartMs;
+    uint32_t u32TcpCloseDelayMs;
 } ModemServiceRuntime_t;
 
 typedef struct
@@ -38,6 +53,24 @@ static ModemServiceRuntime_t s_mSvcRun;
 static ModemServiceStatus_t s_mSvcSts;
 
 static void ModemService_TryStartNetwork(void);
+
+/*******************************************************
+  * Name    :ModemService_ScheduleTcpClose
+  * Author  :LoH
+  * Function:Schedule one link-only close after ACK processing has completed.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+static void ModemService_ScheduleTcpClose(uint32_t u32DelayMs)
+{
+    if ((s_mSvcRun.u8TcpClosePending == 0U) && (s_mSvcRun.u8TcpCloseStarted == 0U))
+    {
+        s_mSvcRun.u8TcpClosePending = 1U;
+        s_mSvcRun.u32TcpCloseStartMs = osKernelSysTick();
+        s_mSvcRun.u32TcpCloseDelayMs = u32DelayMs;
+        HMI_LOG_MODEM("TCP_CLOSE_SCHEDULED\r\n");
+    }
+}
 
 /*******************************************************
   * Name    :ModemService_IsVoiceCallInProgress
@@ -77,16 +110,20 @@ static void ModemService_EnterNetworkSleep(void)
   * Author  :LoH
   * Function:Release failed data-service work and continue one approved emergency voice call.
   * Version :V1.0.0
-  * Data    :2026.09.13
+  * Data    :2026.11.14
 *******************************************************/
 static void ModemService_StartEmergencyCallFallback(const char *pcLog)
 {
     ModemNetwork_Reset();
     ModemPlatform_Reset();
     s_mSvcSts.enServiceState = MODEM_SERVICE_SLEEP;
-    s_mSvcRun.u8NetworkOnlineRequested = 0U;
-    s_mSvcRun.u8NetworkSleepRequested = 0U;
-    ModemCall_Start(&s_mSvcSts.enCallState);
+    s_mSvcRun.u8NetworkRetryWaiting = 1U;
+    s_mSvcRun.u32NetworkRetryStartMs = osKernelSysTick();
+    if (s_mSvcSts.enCallState == MODEM_CALL_PREPARING)
+    {
+        ModemCall_Start(&s_mSvcSts.enCallState);
+    }
+    /* Pending MSD remains queued and the data network retries independently. */
     HMI_LOG_MODEM(pcLog);
 }
 
@@ -95,16 +132,35 @@ static void ModemService_StartEmergencyCallFallback(const char *pcLog)
   * Author  :LoH
   * Function:Start the network flow only after the physical modem path is ready for AT traffic.
   * Version :V1.0.0
-  * Data    :2026.09.06
+  * Data    :2026.11.14
 *******************************************************/
 static void ModemService_TryStartNetwork(void)
 {
     if ((s_mSvcRun.u8NetworkOnlineRequested != 0U)
         && (s_mSvcSts.enServiceState == MODEM_SERVICE_SLEEP)
-        && (ModemPower_IsOnlineReady() != 0U))
+        && (ModemPower_IsOnlineReady() != 0U)
+        && ((s_mSvcRun.u8NetworkRetryWaiting == 0U)
+            || ((uint32_t)(osKernelSysTick() - s_mSvcRun.u32NetworkRetryStartMs) >= 30000UL)))
     {
-        ModemNetwork_Start();
-        s_mSvcSts.enServiceState = MODEM_SERVICE_NETWORK_STARTUP;
+        if ((ModemPlatform_HasPendingMsd() != 0U)
+            && (ModemPlatform_IsMsdAttemptDue() == 0U))
+        {
+            return;
+        }
+        s_mSvcRun.u8NetworkRetryWaiting = 0U;
+        if (ModemNetwork_IsPdpReady() != 0U)
+        {
+            if (ModemNetwork_RequestTcpConnect() != 0U)
+            {
+                s_mSvcSts.enServiceState = MODEM_SERVICE_NETWORK_STARTUP;
+                HMI_LOG_MODEM("TCP_RECONNECT_REQUESTED\r\n");
+            }
+        }
+        else
+        {
+            ModemNetwork_Start();
+            s_mSvcSts.enServiceState = MODEM_SERVICE_NETWORK_STARTUP;
+        }
     }
 }
 
@@ -113,13 +169,13 @@ static void ModemService_TryStartNetwork(void)
   * Author  :LoH
   * Function:Drive the private network module until TCP is ready or fails.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
 static void ModemService_ProcessNetworkStartup(void)
 {
     if (ModemNetwork_TakeFailure() != 0U)
     {
-        if (s_mSvcRun.u8EmergencyRequestPending != 0U)
+        if ((s_mSvcRun.u8EmergencyRequestPending != 0U) || (ModemPlatform_HasPendingMsd() != 0U))
         {
             ModemService_StartEmergencyCallFallback("NETWORK_FAILED_CALL_FALLBACK\r\n");
         }
@@ -140,39 +196,86 @@ static void ModemService_ProcessNetworkStartup(void)
   * Author  :LoH
   * Function:Drive the private platform workflow and handle its failure event.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
 static void ModemService_ProcessPlatform(void)
 {
     ModemPlatformEvent_t enEvent;
-    uint8_t u8HeartbeatEnabled;
 
-    u8HeartbeatEnabled = (s_mSvcRun.u8NetworkSleepRequested == 0U) ? 1U : 0U;
-    ModemPlatform_Process(u8HeartbeatEnabled);
+    /* Short TCP sessions do not send application heartbeat frames. */
+    ModemPlatform_Process(0U);
     enEvent = ModemPlatform_TakeEvent();
 
     switch (enEvent)
     {
         case MODEM_PLATFORM_EVENT_NONE:
-        case MODEM_PLATFORM_EVENT_REGISTERED:
         case MODEM_PLATFORM_EVENT_MSD_STARTED:
             break;
 
+        case MODEM_PLATFORM_EVENT_REGISTERED:
+            if ((ModemPlatform_HasPendingMsd() == 0U)
+                || (ModemPlatform_IsMsdAttemptDue() == 0U))
+            {
+                ModemService_ScheduleTcpClose(MODEM_PLATFORM_TCP_CLOSE_GRACE_MS);
+            }
+            break;
+
         case MODEM_PLATFORM_EVENT_MSD_UPLOADED:
-            ModemCall_Start(&s_mSvcSts.enCallState);
+            HMI_LOG_MODEM("MSD_DELIVERY_CONFIRMED\r\n");
+            ModemService_ScheduleTcpClose(MODEM_PLATFORM_TCP_CLOSE_GRACE_MS);
             break;
 
         case MODEM_PLATFORM_EVENT_FAILED:
         default:
-            if (s_mSvcRun.u8EmergencyRequestPending != 0U)
+            ModemService_ScheduleTcpClose(0U);
+            break;
+    }
+}
+
+/*******************************************************
+  * Name    :ModemService_ProcessTcpClose
+  * Author  :LoH
+  * Function:Close the short TCP session and retain PDP for the next event attempt.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+static void ModemService_ProcessTcpClose(void)
+{
+    if (s_mSvcRun.u8TcpCloseStarted != 0U)
+    {
+        if (ModemNetwork_TakeTcpClosed() != 0U)
+        {
+            ModemPlatform_Reset();
+            s_mSvcRun.u8TcpCloseStarted = 0U;
+            s_mSvcRun.u8TcpClosePending = 0U;
+            s_mSvcSts.enServiceState = MODEM_SERVICE_SLEEP;
+            s_mSvcRun.u8NetworkOnlineRequested = (ModemPlatform_HasPendingMsd() != 0U) ? 1U : 0U;
+            HMI_LOG_MODEM("SHORT_SESSION_CLOSED\r\n");
+        }
+        else if (ModemNetwork_TakeFailure() != 0U)
+        {
+            s_mSvcRun.u8TcpCloseStarted = 0U;
+            s_mSvcRun.u8TcpClosePending = 0U;
+            if ((s_mSvcRun.u8EmergencyRequestPending != 0U) || (ModemPlatform_HasPendingMsd() != 0U))
             {
-                ModemService_StartEmergencyCallFallback("MSD_UPLOAD_FAILED_CALL_FALLBACK\r\n");
+                ModemService_StartEmergencyCallFallback("TCP_CLOSE_FAILED_CALL_FALLBACK\r\n");
             }
             else
             {
                 ModemService_EnterNetworkSleep();
             }
-            break;
+        }
+    }
+    else if ((s_mSvcRun.u8TcpClosePending != 0U)
+        && ((uint32_t)(osKernelSysTick() - s_mSvcRun.u32TcpCloseStartMs) >= s_mSvcRun.u32TcpCloseDelayMs)
+        && (ModemPlatform_CanYieldPort() != 0U)
+        && (ModemNetwork_CanYieldPort() != 0U)
+        && (ModemPort_IsIdle() != 0U)
+        && (ModemNetwork_RequestTcpClose() != 0U))
+    {
+        s_mSvcRun.u8TcpClosePending = 0U;
+        s_mSvcRun.u8TcpCloseStarted = 1U;
+        HMI_LOG_MODEM("TCP_CLOSE_REQUESTED\r\n");
     }
 }
 
@@ -181,11 +284,12 @@ static void ModemService_ProcessPlatform(void)
   * Author  :LoH
   * Function:Apply the KL15 delayed sleep policy after platform online work.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
 static void ModemService_ProcessOnlineSleep(void)
 {
     if ((s_mSvcRun.u8NetworkSleepRequested != 0U)
+        && (ModemPlatform_HasPendingMsd() == 0U)
         && ((s_mSvcSts.enCallState == MODEM_CALL_IDLE)
             || (s_mSvcSts.enCallState == MODEM_CALL_ENDED)
             || (s_mSvcSts.enCallState == MODEM_CALL_FAILED)))
@@ -210,7 +314,7 @@ static void ModemService_ProcessOnlineSleep(void)
   * Author  :LoH
   * Function:Reset modem network, platform, audio and call states before task scheduling.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
 void ModemService_Init(void)
 {
@@ -225,6 +329,7 @@ void ModemService_Init(void)
     ModemCall_Init();
     ModemGnss_Init();
     ModemTime_Init();
+    ModemIdentity_Init();
     ModemPower_Init();
 }
 
@@ -233,23 +338,25 @@ void ModemService_Init(void)
   * Author  :LoH
   * Function:Latch MSD and request emergency network service.
   * Version :V1.0.0
-  * Data    :2026.08.27
+  * Data    :2026.11.14
 *******************************************************/
 void ModemService_RequestEmergencyCall(const EcallMsd_t *pstMsd)
 {
-    if ((pstMsd != 0)
+    if (pstMsd == 0)
+    {
+        return;
+    }
+    taskENTER_CRITICAL();
+    if ((s_mSvcRun.u8NewEmergencyRequested == 0U)
         && ((s_mSvcSts.enCallState == MODEM_CALL_IDLE)
             || (s_mSvcSts.enCallState == MODEM_CALL_ENDED)
             || (s_mSvcSts.enCallState == MODEM_CALL_FAILED)))
     {
-        ModemCall_Reset();
-        ModemPlatform_RequestMsdUpload(pstMsd);
-        s_mSvcRun.u8EmergencyRequestPending = 1U;
-        s_mSvcRun.u8NetworkOnlineRequested = 1U;
-        s_mSvcRun.u8NetworkSleepRequested = 0U;
-        ModemPower_RequestOnline();
+        s_mSvcRun.stRequestedMsd = *pstMsd;
+        s_mSvcRun.u8NewEmergencyRequested = 1U;
         s_mSvcSts.enCallState = MODEM_CALL_PREPARING;
     }
+    taskEXIT_CRITICAL();
 }
 
 /*******************************************************
@@ -285,39 +392,97 @@ void ModemService_RequestNetworkSleep(void)
 }
 
 /*******************************************************
+  * Name    :ModemService_ConsumeEmergencyRequest
+  * Author  :LoH
+  * Function:Move the EcallTask mailbox into workflows owned exclusively by ModemTask.
+  * Version :V1.0.0
+  * Data    :2026.11.14
+*******************************************************/
+static void ModemService_ConsumeEmergencyRequest(void)
+{
+    EcallMsd_t stMsd;
+    uint8_t u8Requested;
+    taskENTER_CRITICAL();
+    u8Requested = s_mSvcRun.u8NewEmergencyRequested;
+    if (u8Requested != 0U)
+    {
+        stMsd = s_mSvcRun.stRequestedMsd;
+        s_mSvcRun.u8NewEmergencyRequested = 0U;
+    }
+    taskEXIT_CRITICAL();
+    if (u8Requested != 0U)
+    {
+        ModemCall_Reset();
+        ModemPlatform_RequestMsdUpload(&stMsd);
+        s_mSvcRun.u8EmergencyRequestPending = 1U;
+        s_mSvcRun.u8NetworkOnlineRequested = 1U;
+        s_mSvcRun.u8NetworkSleepRequested = 0U;
+        s_mSvcRun.u8NetworkRetryWaiting = 0U;
+        s_mSvcRun.u32EmergencyStartMs = osKernelSysTick();
+        ModemPower_RequestOnline();
+    }
+}
+
+/*******************************************************
   * Name    :ModemService_Process
   * Author  :LoH
   * Function:Dispatch network, platform, audio and independent call workflows.
   * Version :V1.0.0
-  * Data    :2026.08.28
+  * Data    :2026.11.14
 *******************************************************/
 void ModemService_Process(void)
 {
-    uint8_t u8PlatformWasOnline;
-
+    ModemService_ConsumeEmergencyRequest();
     ModemPower_Process();
-    ModemService_TryStartNetwork();
+    ModemPlatform_Tick();
 
-    if ((s_mSvcRun.u8EmergencyRequestPending != 0U)
-        && (ModemGnss_IsBusy() != 0U))
+    if (ModemIdentity_IsBusy() != 0U)
+    {
+        ModemIdentity_Process(0U);
+        ModemCall_Process(&s_mSvcSts.enCallState, 0U);
+        return;
+    }
+    if ((s_mSvcRun.u8EmergencyRequestPending != 0U) && (ModemGnss_IsBusy() != 0U))
     {
         ModemGnss_AbortForEmergency();
     }
-
     if (ModemGnss_IsBusy() != 0U)
     {
         ModemGnss_Process(0U);
+        ModemCall_Process(&s_mSvcSts.enCallState, 0U);
         return;
     }
-
     if (ModemTime_IsBusy() != 0U)
     {
         ModemTime_Process(0U);
+        ModemCall_Process(&s_mSvcSts.enCallState, 0U);
         return;
     }
 
-    ModemNetwork_Process((ModemService_IsVoiceCallInProgress() == 0U) ? 1U : 0U);
+    if ((s_mSvcSts.enCallState == MODEM_CALL_PREPARING)
+        && (ModemPower_IsOnlineReady() != 0U)
+        && ((ModemNetwork_IsVoiceReady() != 0U)
+            || ((uint32_t)(osKernelSysTick() - s_mSvcRun.u32EmergencyStartMs) >= 30000UL)))
+    {
+        ModemCall_Start(&s_mSvcSts.enCallState);
+        HMI_LOG_MODEM("VOICE_REQUEST_WITHOUT_ACK_GATE\r\n");
+    }
 
+    /* The owner consumes a completed result before another workflow can enqueue work. */
+    if ((ModemCall_NeedsPort() != 0U)
+        && (ModemNetwork_CanYieldPort() != 0U)
+        && (ModemPlatform_CanYieldPort() != 0U))
+    {
+        ModemAudio_Process();
+        ModemCall_Process(&s_mSvcSts.enCallState, 1U);
+        return;
+    }
+
+    ModemService_TryStartNetwork();
+    if (ModemPlatform_CanYieldPort() != 0U)
+    {
+        ModemNetwork_Process((ModemService_IsVoiceCallInProgress() == 0U) ? 1U : 0U);
+    }
     if (ModemNetwork_TakeTransportRecoveryStarted() != 0U)
     {
         if (s_mSvcSts.enServiceState != MODEM_SERVICE_SLEEP)
@@ -325,70 +490,58 @@ void ModemService_Process(void)
             ModemPlatform_Reset();
             s_mSvcSts.enServiceState = MODEM_SERVICE_NETWORK_STARTUP;
         }
-        else
-        {
-            /* Do not wake a KL15-controlled sleeping network for a stale recovery event. */
-        }
     }
+
+    ModemService_ProcessTcpClose();
 
     switch (s_mSvcSts.enServiceState)
     {
         case MODEM_SERVICE_SLEEP:
-            /* Network start is requested by KL15 or eCall through ModemNetwork_Start(). */
             break;
-
         case MODEM_SERVICE_NETWORK_STARTUP:
             ModemService_ProcessNetworkStartup();
             break;
-
         case MODEM_SERVICE_PLATFORM_ACTIVE:
-            if (ModemService_IsVoiceCallInProgress() == 0U)
+            if ((s_mSvcRun.u8TcpCloseStarted == 0U)
+                && (ModemNetwork_CanYieldPort() != 0U))
             {
-                u8PlatformWasOnline = ModemPlatform_IsOnline();
                 ModemService_ProcessPlatform();
-                if ((u8PlatformWasOnline != 0U)
-                    && (s_mSvcSts.enServiceState == MODEM_SERVICE_PLATFORM_ACTIVE)
-                    && (ModemPlatform_IsOnline() != 0U))
-                {
-                    ModemService_ProcessOnlineSleep();
-                }
-            }
-            else
-            {
-                /* Do not send platform data while voice work owns the AT port. */
             }
             break;
-
         default:
-            HMI_LOG_MODEM("NETWORK_STATE_UNKNOWN\r\n");
             ModemService_EnterNetworkSleep();
             break;
     }
 
-    ModemAudio_Process();
-    ModemCall_Process(&s_mSvcSts.enCallState);
+    ModemService_ProcessOnlineSleep();
 
-    if ((s_mSvcSts.enCallState == MODEM_CALL_ENDED)
-        || (s_mSvcSts.enCallState == MODEM_CALL_FAILED))
+    ModemCall_Process(&s_mSvcSts.enCallState, 0U);
+    if ((s_mSvcSts.enCallState == MODEM_CALL_ENDED) || (s_mSvcSts.enCallState == MODEM_CALL_FAILED))
     {
         s_mSvcRun.u8EmergencyRequestPending = 0U;
     }
 
-    if ((s_mSvcSts.enServiceState == MODEM_SERVICE_PLATFORM_ACTIVE)
+    if ((((s_mSvcSts.enServiceState == MODEM_SERVICE_PLATFORM_ACTIVE)
+            && (ModemPlatform_IsBackgroundAllowed() != 0U))
+        || ((s_mSvcSts.enServiceState == MODEM_SERVICE_SLEEP)
+            && (ModemNetwork_IsPdpReady() != 0U)))
         && (s_mSvcRun.u8EmergencyRequestPending == 0U)
         && (s_mSvcRun.u8NetworkSleepRequested == 0U)
-        && ((s_mSvcSts.enCallState == MODEM_CALL_IDLE)
-            || (s_mSvcSts.enCallState == MODEM_CALL_ENDED)
-            || (s_mSvcSts.enCallState == MODEM_CALL_FAILED))
-        && (ModemPlatform_IsBackgroundAllowed() != 0U))
+        && (s_mSvcRun.u8TcpClosePending == 0U)
+        && (s_mSvcRun.u8TcpCloseStarted == 0U)
+        && (ModemNetwork_CanYieldPort() != 0U)
+        && (ModemPort_IsIdle() != 0U))
     {
-        ModemTime_Process(1U);
-        if (ModemTime_IsBusy() == 0U)
+        ModemIdentity_Process(1U);
+        if (ModemIdentity_IsBusy() == 0U)
         {
-            ModemGnss_Process(1U);
+            ModemTime_Process(1U);
+            if (ModemTime_IsBusy() == 0U)
+            {
+                ModemGnss_Process(1U);
+            }
         }
     }
-
 }
 
 /*******************************************************

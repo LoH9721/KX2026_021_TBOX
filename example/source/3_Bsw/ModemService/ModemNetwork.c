@@ -24,7 +24,8 @@ typedef enum
     MODEM_NETWORK_STEP_PDP_OPENING,
     MODEM_NETWORK_STEP_PDP_ACTIVE,
     MODEM_NETWORK_STEP_TCP_CONNECTING,
-    MODEM_NETWORK_STEP_ONLINE
+    MODEM_NETWORK_STEP_ONLINE,
+    MODEM_NETWORK_STEP_TCP_CLOSING
 } ModemNetworkStep_t;
 
 typedef enum
@@ -58,12 +59,21 @@ typedef enum
     MODEM_TCP_OPEN_RETRY_WAIT
 } ModemTcpConnectStep_t;
 
+typedef enum
+{
+    MODEM_TCP_CLOSE_STEP_QUEUE = 0U,
+    MODEM_TCP_CLOSE_STEP_WAIT
+} ModemTcpCloseStep_t;
+
 typedef struct
 {
     ModemAtSyncStep_t enAtSyncStep;
     ModemPdpOpenStep_t enPdpOpenStep;
     ModemTcpConnectStep_t enTcpConnectStep;
+    ModemTcpCloseStep_t enTcpCloseStep;
     uint8_t u8TcpOpenRetryCount;
+    uint8_t u8TcpConnectRequested;
+    uint8_t u8IgnoreNextTcpClosedUrc;
     uint32_t u32TcpOpenRetryHoldMs;
     char acTcpOpenCommand[MODEM_TCP_COMMAND_LENGTH];
 } ModemNetworkRuntime_t;
@@ -72,6 +82,7 @@ typedef struct
 {
     ModemNetworkStep_t enNetworkStep;
     uint8_t u8TcpConnectedEvent;
+    uint8_t u8TcpClosedEvent;
     uint8_t u8TransportRecoveryPending;
     uint8_t u8TransportRecoveryStartedEvent;
     uint8_t u8FailureEvent;
@@ -160,6 +171,42 @@ static uint8_t ModemNetwork_IsPdpOpened(const char *pcResponse)
 static uint8_t ModemNetwork_IsTcpOpened(const char *pcResponse)
 {
     return ((pcResponse != 0) && (strstr(pcResponse, "+CIPOPEN: 0,0") != 0)) ? 1U : 0U;
+}
+
+/*******************************************************
+  * Name    :ModemNetwork_IsTcpClosed
+  * Author  :LoH
+  * Function:Return whether CIPCLOSE confirms a successful close on link zero.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+static uint8_t ModemNetwork_IsTcpClosed(const char *pcResponse)
+{
+    unsigned int u32LinkId;
+    unsigned int u32Error;
+
+    if (pcResponse == 0)
+    {
+        return 0U;
+    }
+    return ((sscanf(pcResponse, "+CIPCLOSE: %u,%u", &u32LinkId, &u32Error) == 2)
+        && (u32LinkId == MODEM_PLATFORM_LINK_ID) && (u32Error == 0U)) ? 1U : 0U;
+}
+
+/*******************************************************
+  * Name    :ModemNetwork_CompleteTcpClose
+  * Author  :LoH
+  * Function:Finish an intentional socket close while retaining the active PDP context.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+static void ModemNetwork_CompleteTcpClose(uint8_t u8CloseUrcConsumed)
+{
+    s_mNetRun.u8TcpConnectRequested = 0U;
+    s_mNetRun.u8IgnoreNextTcpClosedUrc = (u8CloseUrcConsumed == 0U) ? 1U : 0U;
+    s_mNetSts.enNetworkStep = MODEM_NETWORK_STEP_PDP_ACTIVE;
+    s_mNetSts.u8TcpClosedEvent = 1U;
+    HMI_LOG_MODEM("TCP_CLOSED_PDP_RETAINED\r\n");
 }
 
 /*******************************************************
@@ -293,8 +340,8 @@ static void ModemNetwork_ProcessPdpOpening(void)
             {
                 if (ModemNetwork_IsPdpOpened(ModemPort_GetLastMatchedResponse()) != 0U)
                 {
-                    HMI_LOG_MODEM("PDP_CLEANUP\r\n");
-                    s_mNetRun.enPdpOpenStep = MODEM_PDP_CLOSE_STEP_QUEUE;
+                    HMI_LOG_MODEM("PDP_REUSED\r\n");
+                    s_mNetRun.enPdpOpenStep = MODEM_PDP_IPADDR_STEP_QUEUE;
                 }
                 else
                 {
@@ -505,6 +552,8 @@ static void ModemNetwork_ProcessTcpConnecting(void)
                 if (ModemNetwork_IsTcpOpened(ModemPort_GetLastMatchedResponse()) != 0U)
                 {
                     HMI_LOG_MODEM("TCP_CONNECTED\r\n");
+                    s_mNetRun.u8TcpConnectRequested = 0U;
+                    s_mNetRun.u8IgnoreNextTcpClosedUrc = 0U;
                     s_mNetSts.u8TcpConnectedEvent = 1U;
                     s_mNetSts.enNetworkStep = MODEM_NETWORK_STEP_ONLINE;
                 }
@@ -536,6 +585,67 @@ static void ModemNetwork_ProcessTcpConnecting(void)
 }
 
 /*******************************************************
+  * Name    :ModemNetwork_ProcessTcpClosing
+  * Author  :LoH
+  * Function:Close only the platform socket and retain the cellular PDP context.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+static void ModemNetwork_ProcessTcpClosing(void)
+{
+    int i32Length;
+
+    switch (s_mNetRun.enTcpCloseStep)
+    {
+        case MODEM_TCP_CLOSE_STEP_QUEUE:
+            ModemPort_ClearFailure();
+            i32Length = snprintf(s_mNetRun.acTcpOpenCommand, sizeof(s_mNetRun.acTcpOpenCommand),
+                                 MODEM_AT_CMD_TCP_CLOSE_FORMAT, MODEM_PLATFORM_LINK_ID);
+            if ((i32Length > 0) && ((uint32_t)i32Length < sizeof(s_mNetRun.acTcpOpenCommand))
+                && (ModemPort_QueueCommand(s_mNetRun.acTcpOpenCommand, MODEM_AT_RSP_TCP_CLOSED,
+                                           MODEM_AT_CFG_TCP_CLOSE_TIMEOUT_MS) != 0U))
+            {
+                s_mNetRun.enTcpCloseStep = MODEM_TCP_CLOSE_STEP_WAIT;
+            }
+            else
+            {
+                HMI_LOG_MODEM("TCP_CLOSE_QUEUE_FAILED\r\n");
+                ModemNetwork_EnterFailure();
+            }
+            break;
+
+        case MODEM_TCP_CLOSE_STEP_WAIT:
+            if (ModemPort_HasFailure() != 0U)
+            {
+                HMI_LOG_MODEM("TCP_CLOSE_FAILED\r\n");
+                ModemNetwork_EnterFailure();
+            }
+            else if (ModemPort_IsIdle() != 0U)
+            {
+                if (ModemNetwork_IsTcpClosed(ModemPort_GetLastMatchedResponse()) != 0U)
+                {
+                    ModemNetwork_CompleteTcpClose(0U);
+                }
+                else
+                {
+                    HMI_LOG_MODEM("TCP_CLOSE_RESULT_FAILED\r\n");
+                    ModemNetwork_EnterFailure();
+                }
+            }
+            else
+            {
+                /* Wait for +CIPCLOSE: 0,0 or the corresponding +IPCLOSE URC. */
+            }
+            break;
+
+        default:
+            HMI_LOG_MODEM("TCP_CLOSE_STEP_UNKNOWN\r\n");
+            ModemNetwork_EnterFailure();
+            break;
+    }
+}
+
+/*******************************************************
   * Name    :ModemNetwork_Init
   * Author  :LoH
   * Function:Initialize private network runtime and status data.
@@ -550,6 +660,7 @@ void ModemNetwork_Init(void)
     s_mNetRun.enAtSyncStep = MODEM_AT_SYNC_STEP_QUEUE;
     s_mNetRun.enPdpOpenStep = MODEM_PDP_STATE_STEP_QUEUE;
     s_mNetRun.enTcpConnectStep = MODEM_TCP_KEEPALIVE_STEP_QUEUE;
+    s_mNetRun.enTcpCloseStep = MODEM_TCP_CLOSE_STEP_QUEUE;
 }
 
 /*******************************************************
@@ -574,6 +685,7 @@ void ModemNetwork_Reset(void)
 void ModemNetwork_Start(void)
 {
     ModemNetwork_Init();
+    s_mNetRun.u8TcpConnectRequested = 1U;
     s_mNetSts.enNetworkStep = MODEM_NETWORK_STEP_AT_SYNC;
     HMI_LOG_MODEM("AT_SYNC\r\n");
 }
@@ -587,8 +699,28 @@ void ModemNetwork_Start(void)
 *******************************************************/
 void ModemNetwork_Process(uint8_t u8RecoveryAllowed)
 {
-    if ((ModemPort_TakePdnDeactivation() != 0U)
-        || (ModemPort_TakeTcpClosed() != 0U))
+    uint8_t u8PdnDeactivated = ModemPort_TakePdnDeactivation();
+    uint8_t u8TcpClosed = ModemPort_TakeTcpClosed();
+
+    if (u8PdnDeactivated != 0U)
+    {
+        if (s_mNetSts.enNetworkStep != MODEM_NETWORK_STEP_IDLE)
+        {
+            s_mNetSts.u8TransportRecoveryPending = 1U;
+            HMI_LOG_MODEM("PDP_LOSS_DETECTED\r\n");
+        }
+    }
+    else if ((u8TcpClosed != 0U) && (s_mNetSts.enNetworkStep == MODEM_NETWORK_STEP_TCP_CLOSING))
+    {
+        ModemPort_ClearFailure();
+        ModemNetwork_CompleteTcpClose(1U);
+    }
+    else if ((u8TcpClosed != 0U) && (s_mNetRun.u8IgnoreNextTcpClosedUrc != 0U))
+    {
+        s_mNetRun.u8IgnoreNextTcpClosedUrc = 0U;
+        HMI_LOG_MODEM("TCP_CLOSE_URC_CONFIRMED\r\n");
+    }
+    else if (u8TcpClosed != 0U)
     {
         if (s_mNetSts.enNetworkStep != MODEM_NETWORK_STEP_IDLE)
         {
@@ -615,16 +747,22 @@ void ModemNetwork_Process(uint8_t u8RecoveryAllowed)
             ModemNetwork_ProcessPdpOpening();
             break;
         case MODEM_NETWORK_STEP_PDP_ACTIVE:
-            HMI_LOG_MODEM("PDP_ACTIVE\r\n");
-            HMI_LOG_MODEM("TCP_CONNECTING\r\n");
-            s_mNetSts.enNetworkStep = MODEM_NETWORK_STEP_TCP_CONNECTING;
-            s_mNetRun.enTcpConnectStep = MODEM_TCP_KEEPALIVE_STEP_QUEUE;
+            if (s_mNetRun.u8TcpConnectRequested != 0U)
+            {
+                HMI_LOG_MODEM("TCP_CONNECTING\r\n");
+                s_mNetSts.enNetworkStep = MODEM_NETWORK_STEP_TCP_CONNECTING;
+                s_mNetRun.enTcpConnectStep = MODEM_TCP_KEEPALIVE_STEP_QUEUE;
+                s_mNetRun.u8TcpOpenRetryCount = 0U;
+            }
             break;
         case MODEM_NETWORK_STEP_TCP_CONNECTING:
             ModemNetwork_ProcessTcpConnecting();
             break;
         case MODEM_NETWORK_STEP_ONLINE:
             /* TCP state is held here until a transport URC requests recovery. */
+            break;
+        case MODEM_NETWORK_STEP_TCP_CLOSING:
+            ModemNetwork_ProcessTcpClosing();
             break;
         default:
             break;
@@ -643,6 +781,68 @@ uint8_t ModemNetwork_TakeTcpConnected(void)
     uint8_t u8Result = s_mNetSts.u8TcpConnectedEvent;
     s_mNetSts.u8TcpConnectedEvent = 0U;
     return u8Result;
+}
+
+/*******************************************************
+  * Name    :ModemNetwork_TakeTcpClosed
+  * Author  :LoH
+  * Function:Return and clear the intentional TCP-closed event.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+uint8_t ModemNetwork_TakeTcpClosed(void)
+{
+    uint8_t u8Result = s_mNetSts.u8TcpClosedEvent;
+    s_mNetSts.u8TcpClosedEvent = 0U;
+    return u8Result;
+}
+
+/*******************************************************
+  * Name    :ModemNetwork_RequestTcpConnect
+  * Author  :LoH
+  * Function:Request a new platform socket on the retained PDP context.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+uint8_t ModemNetwork_RequestTcpConnect(void)
+{
+    if (s_mNetSts.enNetworkStep != MODEM_NETWORK_STEP_PDP_ACTIVE)
+    {
+        return 0U;
+    }
+    s_mNetRun.u8TcpConnectRequested = 1U;
+    return 1U;
+}
+
+/*******************************************************
+  * Name    :ModemNetwork_RequestTcpClose
+  * Author  :LoH
+  * Function:Request an intentional socket close without deactivating PDP.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+uint8_t ModemNetwork_RequestTcpClose(void)
+{
+    if ((s_mNetSts.enNetworkStep != MODEM_NETWORK_STEP_ONLINE)
+        || (ModemPort_IsIdle() == 0U))
+    {
+        return 0U;
+    }
+    s_mNetRun.enTcpCloseStep = MODEM_TCP_CLOSE_STEP_QUEUE;
+    s_mNetSts.enNetworkStep = MODEM_NETWORK_STEP_TCP_CLOSING;
+    return 1U;
+}
+
+/*******************************************************
+  * Name    :ModemNetwork_IsPdpReady
+  * Author  :LoH
+  * Function:Return whether PDP is retained with no platform socket transaction active.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+uint8_t ModemNetwork_IsPdpReady(void)
+{
+    return (s_mNetSts.enNetworkStep == MODEM_NETWORK_STEP_PDP_ACTIVE) ? 1U : 0U;
 }
 
 /*******************************************************
@@ -671,4 +871,51 @@ uint8_t ModemNetwork_TakeFailure(void)
     uint8_t u8Result = s_mNetSts.u8FailureEvent;
     s_mNetSts.u8FailureEvent = 0U;
     return u8Result;
+}
+
+/*******************************************************
+  * Name    :ModemNetwork_CanYieldPort
+  * Author  :LoH
+  * Function:Yield only between complete network command transactions, never before consuming a result.
+  * Version :V1.0.0
+  * Data    :2026.11.14
+*******************************************************/
+uint8_t ModemNetwork_CanYieldPort(void)
+{
+    switch (s_mNetSts.enNetworkStep)
+    {
+        case MODEM_NETWORK_STEP_AT_SYNC:
+            return (s_mNetRun.enAtSyncStep == MODEM_AT_SYNC_STEP_QUEUE) ? 1U : 0U;
+        case MODEM_NETWORK_STEP_PDP_OPENING:
+            return ((s_mNetRun.enPdpOpenStep == MODEM_PDP_STATE_STEP_QUEUE)
+                || (s_mNetRun.enPdpOpenStep == MODEM_PDP_CLOSE_STEP_QUEUE)
+                || (s_mNetRun.enPdpOpenStep == MODEM_PDP_OPEN_STEP_QUEUE)
+                || (s_mNetRun.enPdpOpenStep == MODEM_PDP_IPADDR_STEP_QUEUE)) ? 1U : 0U;
+        case MODEM_NETWORK_STEP_TCP_CONNECTING:
+            return ((s_mNetRun.enTcpConnectStep == MODEM_TCP_KEEPALIVE_STEP_QUEUE)
+                || (s_mNetRun.enTcpConnectStep == MODEM_TCP_DATA_ECHO_STEP_QUEUE)
+                || (s_mNetRun.enTcpConnectStep == MODEM_TCP_RX_MODE_STEP_QUEUE)
+                || (s_mNetRun.enTcpConnectStep == MODEM_TCP_OPEN_STEP_QUEUE)
+                || (s_mNetRun.enTcpConnectStep == MODEM_TCP_OPEN_RETRY_WAIT)) ? 1U : 0U;
+        case MODEM_NETWORK_STEP_TCP_CLOSING:
+            return (s_mNetRun.enTcpCloseStep == MODEM_TCP_CLOSE_STEP_QUEUE) ? 1U : 0U;
+        default:
+            return 1U;
+    }
+}
+
+/*******************************************************
+  * Name    :ModemNetwork_IsVoiceReady
+  * Author  :LoH
+  * Function:Allow voice setup after SIM and network registration without waiting for PDP or TCP.
+  * Version :V1.0.0
+  * Data    :2026.11.14
+*******************************************************/
+uint8_t ModemNetwork_IsVoiceReady(void)
+{
+    return ((s_mNetSts.enNetworkStep == MODEM_NETWORK_STEP_PDP_OPENING)
+        || (s_mNetSts.enNetworkStep == MODEM_NETWORK_STEP_PDP_ACTIVE)
+        || (s_mNetSts.enNetworkStep == MODEM_NETWORK_STEP_TCP_CONNECTING)
+        || (s_mNetSts.enNetworkStep == MODEM_NETWORK_STEP_ONLINE)
+        || (s_mNetSts.enNetworkStep == MODEM_NETWORK_STEP_TCP_CLOSING)) ? 1U : 0U;
 }

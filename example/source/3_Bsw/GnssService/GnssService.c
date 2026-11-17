@@ -22,15 +22,38 @@ typedef struct
 static GnssServiceRuntime_t s_mGnssRun;
 
 /*******************************************************
+  * Name    :GnssService_SetInvalidPosition
+  * Author  :LoH
+  * Function:Apply the GB 45672 invalid coordinate value to current and historical points.
+  * Version :V1.0.0
+  * Data    :2026.11.16
+*******************************************************/
+static void GnssService_SetInvalidPosition(EcallMsd_t *pstMsd)
+{
+    uint8_t u8Index;
+
+    pstMsd->gnss_valid = 0U;
+    pstMsd->latitude_e7 = INT32_MAX;
+    pstMsd->longitude_e7 = INT32_MAX;
+    pstMsd->utc_seconds = 0U;
+    for (u8Index = 0U; u8Index < ECALL_GNSS_HISTORY_COUNT; u8Index++)
+    {
+        pstMsd->history_latitude_e7[u8Index] = INT32_MAX;
+        pstMsd->history_longitude_e7[u8Index] = INT32_MAX;
+    }
+}
+
+/*******************************************************
   * Name    :GnssService_Init
   * Author  :LoH
-  * Function:Clear current position, UTC and historical positions.
+  * Function:Initialize current and historical positions to the invalid value.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.11.16
 *******************************************************/
 void GnssService_Init(void)
 {
     (void)memset(&s_mGnssRun, 0, sizeof(s_mGnssRun));
+    GnssService_SetInvalidPosition(&s_mGnssRun.stMsd);
 }
 
 /*******************************************************
@@ -74,9 +97,9 @@ void GnssService_Process(void)
 /*******************************************************
   * Name    :GnssService_GetLatest
   * Author  :LoH
-  * Function:Copy a frozen snapshot and reject a position older than five seconds.
+  * Function:Copy a fresh snapshot or return GB 45672 invalid coordinates.
   * Version :V1.0.0
-  * Data    :2026.08.29
+  * Data    :2026.11.16
 *******************************************************/
 uint8_t GnssService_GetLatest(EcallMsd_t *pstMsd)
 {
@@ -95,11 +118,7 @@ uint8_t GnssService_GetLatest(EcallMsd_t *pstMsd)
     pstMsd->gnss_valid = u8Valid;
     if (u8Valid == 0U)
     {
-        pstMsd->latitude_e7 = 0;
-        pstMsd->longitude_e7 = 0;
-        pstMsd->utc_seconds = 0U;
-        (void)memset(pstMsd->history_latitude_e7, 0, sizeof(pstMsd->history_latitude_e7));
-        (void)memset(pstMsd->history_longitude_e7, 0, sizeof(pstMsd->history_longitude_e7));
+        GnssService_SetInvalidPosition(pstMsd);
     }
     return u8Valid;
 }

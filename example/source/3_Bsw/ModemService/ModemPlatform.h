@@ -37,4 +37,13 @@ uint8_t ModemPlatform_IsBackgroundAllowed(void);
 /* Return and clear one platform workflow result event. */
 ModemPlatformEvent_t ModemPlatform_TakeEvent(void);
 
+/* Maintain ACK/retry time using the system clock regardless of port ownership. */
+void ModemPlatform_Tick(void);
+/* Return whether one data message still requires delivery. */
+uint8_t ModemPlatform_HasPendingMsd(void);
+/* Return whether the next frozen-MSD transmission attempt is due. */
+uint8_t ModemPlatform_IsMsdAttemptDue(void);
+/* Return whether voice/background work may acquire the AT port. */
+uint8_t ModemPlatform_CanYieldPort(void);
+
 #endif

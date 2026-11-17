@@ -15,12 +15,13 @@
 /*******************************************************
   * Name    :GnssTask_Entry
   * Author  :LoH
-  * Function:Update GNSS cache and immediately report its snapshot to eCall.
+  * Function:Update the GNSS cache and report only a fresh snapshot to eCall.
   * Version :V1.0.0
-  * Data    :2026.08.26
+  * Data    :2026.11.16
 *******************************************************/
 static void GnssTask_Entry(void const *argument)
 {
+    EcallMsd_t stMsd;
     uint8_t u8RequestReported = 0U;
 
     (void)argument;
@@ -31,7 +32,9 @@ static void GnssTask_Entry(void const *argument)
         GnssService_Process();
         TimeService_Process();
 
-        if ((Ecall_GetState() == ECALL_STATE_WAIT_GNSS) && (u8RequestReported == 0U))
+        if ((Ecall_GetState() == ECALL_STATE_WAIT_GNSS)
+            && (u8RequestReported == 0U)
+            && (GnssService_GetLatest(&stMsd) != 0U))
         {
             EcallTask_PostEvent(ECALL_TASK_EVT_GNSS_READY);
             u8RequestReported = 1U;

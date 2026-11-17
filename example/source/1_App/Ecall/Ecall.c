@@ -21,9 +21,9 @@ static uint8_t m_u8CallRequestSent = 0U;
 /*******************************************************
   * Name    :Ecall_ClearMsd
   * Author  :LoH
-  * Function:Clear the local MSD cache.
+  * Function:Reset the MSD cache with invalid GNSS coordinate sentinels.
   * Version :V1.0.0
-  * Data    :2026.08.26
+  * Data    :2026.11.16
 *******************************************************/
 static void Ecall_ClearMsd(void)
 {
@@ -31,8 +31,8 @@ static void Ecall_ClearMsd(void)
 
     m_stEcallMsd.trigger_mask = 0U;
     m_stEcallMsd.gnss_valid = 0U;
-    m_stEcallMsd.latitude_e7 = 0;
-    m_stEcallMsd.longitude_e7 = 0;
+    m_stEcallMsd.latitude_e7 = INT32_MAX;
+    m_stEcallMsd.longitude_e7 = INT32_MAX;
     m_stEcallMsd.utc_seconds = 0U;
     m_stEcallMsd.delta_v_longitudinal_raw = 0U;
     m_stEcallMsd.delta_v_lateral_raw = 0U;
@@ -40,8 +40,8 @@ static void Ecall_ClearMsd(void)
     m_stEcallMsd.rollover = 0U;
     for (u8Index = 0U; u8Index < ECALL_GNSS_HISTORY_COUNT; u8Index++)
     {
-        m_stEcallMsd.history_latitude_e7[u8Index] = 0;
-        m_stEcallMsd.history_longitude_e7[u8Index] = 0;
+        m_stEcallMsd.history_latitude_e7[u8Index] = INT32_MAX;
+        m_stEcallMsd.history_longitude_e7[u8Index] = INT32_MAX;
     }
 }
 

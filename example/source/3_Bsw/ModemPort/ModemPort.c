@@ -3,7 +3,7 @@
   * Author  :LoH
   * Function:Modem UART AT queue port implementation.
   * Version :V1.0.0
-  * Data    :2026.08.27
+  * Data    :2026.11.14
 *******************************************************/
 #include "cmsis_os.h"
 #include <stdio.h>
@@ -21,6 +21,7 @@ typedef struct
 {
     const char *pcCommand;
     const char *pcExpected;
+    const char *pcInformationPrefix;
     uint32_t u32TimeoutMs;
     uint8_t u8LogEnabled;
 } ModemPortCommand_t;
@@ -50,6 +51,7 @@ typedef struct
     ModemPortVoiceEvent_t enVoiceEvent;
     char acLastMatchedResponse[MODEM_PORT_LINE_LENGTH];
     char acLastDataLine[MODEM_PORT_LINE_LENGTH];
+    char acInformationLine[128];
 } ModemPortStatus_t;
 
 static ModemPortRuntime_t m_stModemPortRuntime;
@@ -243,7 +245,7 @@ static void ModemPort_FinishActiveCommand(ModemPortResult_t enResult)
   * Author  :LoH
   * Function:Start the next queued AT command in task context.
   * Version :V1.0.0
-  * Data    :2026.08.27
+  * Data    :2026.11.14
 *******************************************************/
 static void ModemPort_StartNextCommand(void)
 {
@@ -263,6 +265,7 @@ static void ModemPort_StartNextCommand(void)
         m_stModemPortRuntime.u8ReadIndex = 0U;
     }
     m_stModemPortRuntime.u8Count--;
+    m_stModemPortStatus.acInformationLine[0] = '\0';
     while ((m_stModemPortRuntime.stActiveCommand.pcCommand[u8Length] != '\0')
            && (u8Length < 255U))
     {
@@ -289,7 +292,7 @@ static void ModemPort_StartNextCommand(void)
   * Author  :LoH
   * Function:Log and classify one complete modem response line.
   * Version :V1.0.0
-  * Data    :2026.08.27
+  * Data    :2026.11.14
 *******************************************************/
 static void ModemPort_HandleResponseLine(const char *pcLine)
 {
@@ -385,6 +388,12 @@ static void ModemPort_HandleResponseLine(const char *pcLine)
     {
         return;
     }
+    if ((m_stModemPortRuntime.stActiveCommand.pcInformationPrefix != 0)
+        && (m_stModemPortStatus.acInformationLine[0] == '\0')
+        && (strncmp(pcLine, m_stModemPortRuntime.stActiveCommand.pcInformationPrefix, strlen(m_stModemPortRuntime.stActiveCommand.pcInformationPrefix)) == 0))
+    {
+        (void)snprintf(m_stModemPortStatus.acInformationLine, sizeof(m_stModemPortStatus.acInformationLine), "%s", pcLine);
+    }
     if (ModemPort_Contains(pcLine, m_stModemPortRuntime.stActiveCommand.pcExpected) != 0U)
     {
         ModemPort_CopyMatchedResponse(pcLine);
@@ -437,7 +446,7 @@ void ModemPort_Init(void)
   * Author  :LoH
   * Function:Queue one AT command and its expected response token.
   * Version :V1.0.0
-  * Data    :2026.08.27
+  * Data    :2026.11.14
 *******************************************************/
 uint8_t ModemPort_QueueCommand(const char *pcCommand, const char *pcExpected, uint32_t u32TimeoutMs)
 {
@@ -451,6 +460,7 @@ uint8_t ModemPort_QueueCommand(const char *pcCommand, const char *pcExpected, ui
     }
     m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].pcCommand = pcCommand;
     m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].pcExpected = pcExpected;
+    m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].pcInformationPrefix = 0;
     m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].u32TimeoutMs = u32TimeoutMs;
     m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].u8LogEnabled = 1U;
     m_stModemPortRuntime.u8WriteIndex++;
@@ -467,7 +477,7 @@ uint8_t ModemPort_QueueCommand(const char *pcCommand, const char *pcExpected, ui
   * Author  :LoH
   * Function:Queue one AT command without periodic success-response logging.
   * Version :V1.0.0
-  * Data    :2026.09.13
+  * Data    :2026.11.14
 *******************************************************/
 uint8_t ModemPort_QueueSilentCommand(const char *pcCommand, const char *pcExpected, uint32_t u32TimeoutMs)
 {
@@ -482,6 +492,7 @@ uint8_t ModemPort_QueueSilentCommand(const char *pcCommand, const char *pcExpect
 
     m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].pcCommand = pcCommand;
     m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].pcExpected = pcExpected;
+    m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].pcInformationPrefix = 0;
     m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].u32TimeoutMs = u32TimeoutMs;
     m_stModemPortRuntime.astCommandQueue[m_stModemPortRuntime.u8WriteIndex].u8LogEnabled = 0U;
     m_stModemPortRuntime.u8WriteIndex++;
@@ -498,7 +509,7 @@ uint8_t ModemPort_QueueSilentCommand(const char *pcCommand, const char *pcExpect
   * Author  :LoH
   * Function:Release one local AT completion wait without sending a modem stop command.
   * Version :V1.0.0
-  * Data    :2026.09.13
+  * Data    :2026.11.14
 *******************************************************/
 uint8_t ModemPort_AbortActiveCommand(void)
 {
@@ -510,6 +521,7 @@ uint8_t ModemPort_AbortActiveCommand(void)
     m_stModemPortRuntime.u8Active = 0U;
     m_stModemPortRuntime.u8SuppressTrailingOk = 0U;
     m_stModemPortRuntime.stActiveCommand.pcCommand = 0;
+    m_stModemPortRuntime.stActiveCommand.pcInformationPrefix = 0;
     m_stModemPortRuntime.stActiveCommand.pcExpected = 0;
     m_stModemPortRuntime.stActiveCommand.u32TimeoutMs = 0U;
     m_stModemPortRuntime.stActiveCommand.u8LogEnabled = 0U;
@@ -763,4 +775,35 @@ void ModemPort_ClearFailure(void)
         m_stModemPortStatus.u8TcpClosed = 0U;
         m_stModemPortStatus.enVoiceEvent = MODEM_PORT_VOICE_EVENT_NONE;
     }
+}
+
+/*******************************************************
+  * Name    :ModemPort_QueueQueryCommand
+  * Author  :LoH
+  * Function:Collect one information line and wait for the final OK, including empty query replies.
+  * Version :V1.0.0
+  * Data    :2026.11.14
+*******************************************************/
+uint8_t ModemPort_QueueQueryCommand(const char *pcCommand, const char *pcInformationPrefix, uint32_t u32TimeoutMs)
+{
+    uint8_t u8Index;
+    if ((pcInformationPrefix == 0) || (ModemPort_QueueSilentCommand(pcCommand, "OK", u32TimeoutMs) == 0U))
+    {
+        return 0U;
+    }
+    u8Index = (m_stModemPortRuntime.u8WriteIndex == 0U) ? (MODEM_PORT_QUEUE_LENGTH - 1U) : (m_stModemPortRuntime.u8WriteIndex - 1U);
+    m_stModemPortRuntime.astCommandQueue[u8Index].pcInformationPrefix = pcInformationPrefix;
+    return 1U;
+}
+
+/*******************************************************
+  * Name    :ModemPort_GetLastInformationLine
+  * Author  :LoH
+  * Function:Return the information line captured by the latest completed query.
+  * Version :V1.0.0
+  * Data    :2026.11.14
+*******************************************************/
+const char *ModemPort_GetLastInformationLine(void)
+{
+    return m_stModemPortStatus.acInformationLine;
 }
