@@ -1,76 +1,179 @@
-# AC7600 GNSS 接入与 eCall MSD 流程
+# AC7600 GNSS、UTC校时与MSD触发时间泳道图
 
-## 结论
+## 当前策略
 
-- 主控继续使用现有 UART4 连接 AC7600 主 AT 串口；不启用第二串口，也不把原始 NMEA 混入当前 AT/TCP/语音通道。
-- AC7600 内部 GNSS 串口负责 GNSS 芯片与模组主处理器之间的数据传输；主控通过同一个 AT 串口执行 `AT+CGNSSPWR?`、`AT+CGNSSPWR=1` 和周期性 `AT+CGPSINFO` 获得解析后的定位。
-- 内部坐标统一为有符号十进制度 `×10,000,000`（e7）；AECS 帧打包时转换为 eCALL_Soft 使用的 `×3,600,000`。
-- 当前坐标单独传输；9 个历史坐标按新到旧排列为 `T-1` 至 `T-9`，不重复当前点。只有新的有效定位才推进历史。
-- 定位查询周期为 1 秒，当前点新鲜度门限为 5 秒。无有效新鲜定位时，经纬度、UTC 和历史区清零，但 eCall 继续执行。
+- MCU与AC7600共用UART4主AT通道，不把原始NMEA混入TCP和语音通道。
+- `AT+CGPSINFO`正常查询周期为1 s；当前点新鲜度为5 s，只有新有效定位才推进 `T-1…T-9` 历史。
+- UTC来源优先级为新鲜GNSS时间、网络NITZ/CCLK时间、无效值0。
+- 上电配置一次 `AT+CTZU=1`；随后立即查询 `AT+CCLK?`。时间无效时最多进行6次10 s快速重试，成功或快速重试耗尽后每30 min校时。
+- `+CCLK`时区以15 min为单位，例如重庆/北京时间 `+32` 表示UTC+8；存入MSD前统一换算为UTC秒。
+- eCall记录触发源到达时的系统tick；触发时已有UTC就立即冻结，否则在构建MSD时用“当前UTC－已过去时间”回算。GNSS位置无效不再强制触发时间无效。
 
-## 泳道图
+## 1. GNSS后台采集和9点历史
 
 ```mermaid
 sequenceDiagram
     participant MT as ModemTask（100 ms）
     participant MS as ModemService
-    participant MP as ModemPlatform
     participant MG as ModemGnss
-    participant Port as ModemPort / UART4
+    participant Port as ModemPort/UART4
     participant AC as AC7600
     participant GT as GnssTask（100 ms）
     participant GS as GnssService
-    participant ET as EcallTask
 
-    MT->>Port: 处理 UART 接收、AT 超时和 URC
     MT->>MS: 周期调度
-    MS->>MP: 先处理网络、平台、心跳和下行
-    MP-->>MS: 平台在线且无接收/心跳/MSD事务
-    MS->>MG: 允许后台 GNSS 使用 AT 口
+    MS->>MS: 确认无注册/MSD/语音/时间AT事务
+    MS->>MG: 允许后台GNSS使用AT口
     MG->>Port: AT+CGNSSPWR?
-    Port->>AC: UART4 发送
     AC-->>Port: +CGNSSPWR: 0/1
-    opt GNSS 未开启
-        MG->>Port: AT+CGNSSPWR=1
-        AC-->>Port: +CGNSSPWR: READY!
+    opt GNSS未开启
+        MG->>Port: AT+CGNSSPWR=1,0,1
+        AC-->>Port: READY/OK
     end
-    loop 每 1 秒且 AT 口安全空闲
+    loop 每1 s且AT口可用
         MG->>Port: AT+CGPSINFO
-        AC-->>Port: +CGPSINFO: 纬度,N/S,经度,E/W,日期,UTC,...
-        MG->>MG: 校验字段并转换为 signed e7 / Unix UTC
-        MG-->>GS: 发布一个有效样本
-        GT->>GS: 消费样本
-        GS->>GS: 当前点更新；旧当前点进入 T-1，依次移至 T-9
+        AC-->>Port: 纬度,N/S,经度,E/W,日期,UTC,...
+        alt 字段完整且UTC/坐标有效
+            MG->>MG: 转换为signed e7和Unix UTC
+            MG-->>GS: 发布新样本
+            GT->>GS: 消费样本
+            GS->>GS: 旧当前点→T-1，历史依次移动到T-9
+        else 空定位或格式无效
+            MG->>MG: 保持上一个缓存，不推进历史
+        end
     end
-    ET->>GS: eCall 触发后立即冻结缓存快照
-    alt 当前点不超过 5 秒
-        GS-->>ET: 当前点 + UTC + T-1…T-9，有效
-    else 无定位或已过期
-        GS-->>ET: GNSS 区域清零，无效但不阻塞
-    end
-    ET->>MS: 请求上传冻结的 MSD
-    MS->>MP: 前台 MSD 优先，暂停新 GNSS 查询
-    MP->>MP: e7 × 9 / 25 → AECS raw
-    MP->>Port: 发送固定 116 字节平台帧（111 字节 MSD）
-    Port->>AC: AT+CIPSEND / 二进制帧
 ```
 
-## AECS MSD 坐标区布局
+## 2. GNSS被紧急业务抢占
 
-| 载荷偏移 | 长度 | 内容 | 单位/顺序 |
+```mermaid
+sequenceDiagram
+    participant ET as EcallTask
+    participant MS as ModemService
+    participant MG as ModemGnss
+    participant Port as ModemPort
+
+    ET->>MS: 新的紧急请求
+    alt GNSS AT事务正在执行
+        MS->>MG: AbortForEmergency
+        MG->>Port: 中止当前GNSS命令
+        alt 中止的是GNSS上电等待
+            MG->>MG: 保留已生效的上电状态，回到查询等待
+        else 中止的是GNSS下电等待
+            MG->>MG: 标记GNSS未就绪
+        else 中止的是位置查询
+            MG->>MG: 回到查询等待，不重复电源循环
+        end
+        MG-->>MS: AT口让给紧急数据/语音
+    else GNSS空闲
+        MS->>MS: 直接执行紧急流程
+    end
+```
+
+紧急抢占只中止当前后台GNSS事务，不把已经成功开启的GNSS误判为关闭，避免每次SOS后重新等待较长的GNSS上电过程。
+
+## 3. NITZ/CCLK低频校时
+
+```mermaid
+sequenceDiagram
+    participant MS as ModemService
+    participant MT as ModemTime
+    participant Port as ModemPort
+    participant AC as AC7600
+    participant TS as TimeService
+
+    MS->>MT: 网络可用且AT口空闲
+    MT->>Port: AT+CTZU?
+    AC-->>Port: +CTZU: 0/1
+    alt CTZU未开启
+        MT->>Port: AT+CTZU=1
+        AC-->>Port: OK
+    end
+    MT->>Port: 立即AT+CCLK?
+    AC-->>Port: +CCLK: yy/MM/dd,hh:mm:ss±zz
+    alt 时间有效
+        MT->>MT: 本地时间减去时区，归一化为UTC
+        MT-->>TS: 发布网络UTC样本
+        MT->>MT: 下一次查询延后30 min
+    else 时间无效或查询失败
+        loop 最多6次快速获取
+            MT->>Port: 每10 s AT+CCLK?
+            AC-->>Port: 时间或失败
+        end
+        MT->>MT: 快速重试耗尽后改为30 min周期
+    end
+```
+
+网络UTC缓存保存“UTC秒＋采样tick”；两次校时之间用系统tick续算，不需要每10 s占用AT通道。模组复位或MCU重新初始化后会重新执行CTZU/CCLK流程。
+
+## 4. UTC仲裁与对外输出
+
+```mermaid
+flowchart TD
+    A[TimeService_GetUtcSeconds] --> B{5 s内有新鲜GNSS UTC?}
+    B -->|是| C[选择GNSS UTC]
+    B -->|否| D{本次上电已取得有效CCLK?}
+    D -->|是| E[选择网络UTC]
+    D -->|否| F[返回INVALID和0]
+    C --> G[缓存UTC秒 + 当前tick差]
+    E --> G
+    G --> H[返回当前Unix UTC秒]
+    H --> I[MSD触发时间]
+    H --> J[CAN时间帧]
+    H --> K[以太网时间帧]
+```
+
+## 5. eCall触发时间冻结与后补
+
+```mermaid
+sequenceDiagram
+    participant SRC as SOS/CAN/自动触发
+    participant ET as EcallTask
+    participant TS as TimeService
+    participant GS as GnssService
+    participant EC as Ecall
+
+    SRC->>ET: RequestTrigger
+    ET->>ET: 保存最早触发tick
+    ET->>TS: GetUtcSeconds
+    alt UTC有效
+        TS-->>ET: 当前UTC
+        ET->>ET: 当前UTC-排队经过时间，冻结触发UTC
+    else UTC无效
+        TS-->>ET: 0/INVALID
+        ET->>ET: 暂时只保留触发tick
+    end
+    Note over ET: 手动SOS可经历10 s取消窗口
+    ET->>GS: 最多等待3 s取得新鲜位置
+    GS-->>ET: 有效位置/历史，或无效坐标
+    ET->>TS: 若触发UTC尚未冻结，再查询当前UTC
+    alt 后续取得GNSS或网络UTC
+        TS-->>ET: 当前UTC
+        ET->>ET: 触发UTC=当前UTC-(当前tick-触发tick)
+    else 仍无可信时间
+        ET->>ET: 触发UTC=0
+    end
+    ET->>EC: 冻结MSD快照
+```
+
+这保证MSD字段表示事件触发时刻，而不是取消窗口结束、GNSS等待结束、TCP连接或上传完成的时刻。同一事件重发继续使用第一次冻结的触发时间。
+
+## 6. MSD位置与时间字段
+
+| 标准区偏移 | 长度 | 内容 | 当前来源与无效值 |
 |---:|---:|---|---|
-| 23 | 4 | 当前 UTC | Unix 秒，大端 |
-| 27 | 4 | 当前经度 | 度 `×3,600,000`，大端有符号值 |
-| 31 | 4 | 当前纬度 | 度 `×3,600,000`，大端有符号值 |
-| 35–106 | 72 | 9 个历史点 | 每点先经度、后纬度；`T-1` 至 `T-9` |
-| 107–110 | 4 | 预留传感器字段 | 本次保持 0 |
+| 23 | 4 | 触发时间 | Unix UTC秒，大端；无可信时间为0。 |
+| 27 | 4 | 当前经度 | e7转换为度`×3,600,000`；无效为标准无效值。 |
+| 31 | 4 | 当前纬度 | e7转换为度`×3,600,000`；无效为标准无效值。 |
+| 35–106 | 72 | 9个历史点 | 每点先经度后纬度，顺序T-1至T-9。 |
+| 107–110 | 4 | 事故字段 | 纵向Delta-V、横向Delta-V、乘员数、翻滚。 |
 
-换算采用整数四舍五入：`AECS raw = round(e7 × 9 / 25)`。例如 `31.1230000°` 的内部值为 `311230000`，打包值为 `112042800`。
+坐标换算采用整数四舍五入：`AECS raw = round(e7 × 9 / 25)`。位置是否有效与时间是否有效分别判断：没有新鲜坐标时，UTC仍可来自网络时间；没有网络时间时，新鲜GNSS UTC仍可用于触发时间。
 
-## 参考依据与仍需实板确认
+## 7. 验证要求
 
-- `eCALL_Soft/Source/1_App/GPS_Module_App/GPS_Location_Services.c`：参考定位解析和历史坐标用途；本实现修正其历史第 1 点重复当前坐标的问题。
-- `eCALL_Soft/Source/1_App/4G_Module_App/4G_NetWork_Manage.c`：参考 111 字节 MSD 布局、经纬度顺序及 `×3,600,000` 单位；本实现分别按 N/S 与 E/W 判定符号。
-- `A7600C-R5_硬件设计手册_V1.01(250710).pdf` 和 `A7600C-R5_GNSS_硬件应用笔记_V1.00(250715).pdf`：GNSS_TXD/RXD、UART2 内部/外部连接能力及主 AT 串口查询方案。
-
-实板验收仍需记录实际 `+CGNSSPWR`、`+CGPSINFO` 回包，并在服务器地图或解码日志中核对正负号、坐标单位、当前点和 9 个历史点的语义。触发类型字节的 bit mask 与 eCALL_Soft 的 0/1 枚举差异不属于本次 GNSS 修改范围，需单独确认服务器协议后处理。
+1. 上电后确认CTZU只配置一次，首次CCLK立即查询；有效后日志中不再每10 s出现 `AT+CCLK?`。
+2. 断开GNSS但保持蜂窝网络，触发MSD，确认触发时间来自CCLK且经纬度为无效值。
+3. 触发时UTC无效，在10 s取消窗口或3 s GNSS等待期间取得时间，确认上传值回算到原触发时刻。
+4. 同一事件发生15 s ACK超时并重传，确认 `ser`、MSD二进制和 `triggerTimeUtc` 均不改变。
+5. 连续采集定位，核对当前点与T-1至T-9不重复、方向符号和坐标单位正确。

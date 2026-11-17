@@ -13,7 +13,9 @@
 #include "ModemAt_Cfg.h"
 #include "ModemPort.h"
 
-#define MODEM_TIME_QUERY_PERIOD_MS 10000UL
+#define MODEM_TIME_INITIAL_QUERY_PERIOD_MS 10000UL
+#define MODEM_TIME_RESYNC_PERIOD_MS      1800000UL
+#define MODEM_TIME_INITIAL_QUERY_LIMIT         6U
 
 typedef enum
 {
@@ -32,9 +34,28 @@ typedef struct
     uint32_t u32LastQueryMs;
     ModemTimeSample_t stSample;
     uint8_t u8SamplePending;
+    uint8_t u8FastQueryCount;
+    uint8_t u8HasValidTime;
 } ModemTimeRuntime_t;
 
 static ModemTimeRuntime_t s_mTimeRun;
+
+/*******************************************************
+  * Name    :ModemTime_GetQueryPeriodMs
+  * Author  :LoH
+  * Function:Use bounded fast acquisition, then low-frequency RTC resynchronization.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+static uint32_t ModemTime_GetQueryPeriodMs(void)
+{
+    if ((s_mTimeRun.u8HasValidTime == 0U)
+        && (s_mTimeRun.u8FastQueryCount < MODEM_TIME_INITIAL_QUERY_LIMIT))
+    {
+        return MODEM_TIME_INITIAL_QUERY_PERIOD_MS;
+    }
+    return MODEM_TIME_RESYNC_PERIOD_MS;
+}
 
 /*******************************************************
   * Name    :ModemTime_IsLeapYear
@@ -229,7 +250,7 @@ void ModemTime_Init(void)
 /*******************************************************
   * Name    :ModemTime_Process
   * Author  :LoH
-  * Function:Configure NITZ update once and periodically query valid CCLK time.
+  * Function:Configure NITZ once, acquire CCLK quickly and resynchronize it at low frequency.
   * Version :V1.0.0
   * Data    :2026.09.13
 *******************************************************/
@@ -257,12 +278,12 @@ void ModemTime_Process(uint8_t u8QueryAllowed)
             if (ModemPort_HasFailure() != 0U)
             {
                 ModemPort_ClearTransactionFailure();
-                s_mTimeRun.enStep = MODEM_TIME_STEP_QUERY_HOLD;
+                s_mTimeRun.enStep = MODEM_TIME_STEP_CCLK_QUEUE;
             }
             else if (ModemPort_IsIdle() != 0U)
             {
                 s_mTimeRun.enStep = (strstr(ModemPort_GetLastMatchedResponse(), "+CTZU: 1") != 0)
-                                    ? MODEM_TIME_STEP_QUERY_HOLD : MODEM_TIME_STEP_CTZU_SET_QUEUE;
+                                    ? MODEM_TIME_STEP_CCLK_QUEUE : MODEM_TIME_STEP_CTZU_SET_QUEUE;
             }
             break;
 
@@ -282,14 +303,13 @@ void ModemTime_Process(uint8_t u8QueryAllowed)
             }
             if (ModemPort_IsIdle() != 0U)
             {
-                s_mTimeRun.u32LastQueryMs = osKernelSysTick();
-                s_mTimeRun.enStep = MODEM_TIME_STEP_QUERY_HOLD;
+                s_mTimeRun.enStep = MODEM_TIME_STEP_CCLK_QUEUE;
             }
             break;
 
         case MODEM_TIME_STEP_QUERY_HOLD:
             if ((u8QueryAllowed != 0U)
-                && ((osKernelSysTick() - s_mTimeRun.u32LastQueryMs) >= MODEM_TIME_QUERY_PERIOD_MS))
+                && ((osKernelSysTick() - s_mTimeRun.u32LastQueryMs) >= ModemTime_GetQueryPeriodMs()))
             {
                 s_mTimeRun.enStep = MODEM_TIME_STEP_CCLK_QUEUE;
             }
@@ -315,10 +335,16 @@ void ModemTime_Process(uint8_t u8QueryAllowed)
                 portENTER_CRITICAL();
                 s_mTimeRun.stSample = stSample;
                 s_mTimeRun.u8SamplePending = 1U;
+                s_mTimeRun.u8HasValidTime = 1U;
                 portEXIT_CRITICAL();
             }
             if (ModemPort_IsIdle() != 0U)
             {
+                if ((s_mTimeRun.u8HasValidTime == 0U)
+                    && (s_mTimeRun.u8FastQueryCount < MODEM_TIME_INITIAL_QUERY_LIMIT))
+                {
+                    s_mTimeRun.u8FastQueryCount++;
+                }
                 s_mTimeRun.u32LastQueryMs = osKernelSysTick();
                 s_mTimeRun.enStep = MODEM_TIME_STEP_QUERY_HOLD;
             }

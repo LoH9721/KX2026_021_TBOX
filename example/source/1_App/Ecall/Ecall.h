@@ -18,6 +18,7 @@ typedef enum
     ECALL_STATE_BUILD_MSD,
     ECALL_STATE_WAIT_CALL_ACTIVE,
     ECALL_STATE_IN_CALL,
+    ECALL_STATE_CALLBACK_STANDBY,
     ECALL_STATE_COMPLETE,
     ECALL_STATE_FAILED
 } EcallState_t;
@@ -37,6 +38,7 @@ typedef enum
                                        ECALL_TRIGGER_MASK_CAN)
 
 #define ECALL_MANUAL_CANCEL_WINDOW_MS 10000U
+#define ECALL_CALLBACK_STANDBY_MS     3600000UL
 #define ECALL_GNSS_HISTORY_COUNT       9U
 
 typedef struct
@@ -72,6 +74,8 @@ void Ecall_OnGnssTimeout(void);
 void Ecall_OnCallActive(void);
 void Ecall_OnCallEnded(void);
 void Ecall_OnCallFailed(void);
+/* Finish one eCall session after the post-call callback window expires. */
+void Ecall_OnCallbackStandbyExpired(void);
 /* Read current eCall state and session activity. */
 EcallState_t Ecall_GetState(void);
 uint8_t Ecall_IsSessionActive(void);

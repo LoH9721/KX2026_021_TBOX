@@ -1,293 +1,273 @@
-# AC7600 TCP/IP 主路径泳道图
+# AC7600 网络、MSD、语音与回呼流程泳道图
 
-## 目的和当前证据
+## 适用范围与证据边界
 
-本文件是 TBOX eCall 样机 AC7600 TCP/IP 主路径的可编辑 Mermaid 源文件。
+本文描述当前源码中的 AC7600 主路径，包括上电自检、PDP 保持、TCP 短连接、每会话注册、MSD 关联应答、数据/语音重试、通话结束后的平台回呼等待，以及异常链路恢复。
 
-- 原厂资料：`D:\TBOX\资料\小华半导体\08-4G模组\A7600C R2&A7608X-H&A7602X-H\01 APP手册\A76XX Series_TCPIP_Application Note_V1.05.pdf`。
-- AT 语法资料：`D:\TBOX\资料\小华半导体\08-4G模组\A7600C R2&A7608X-H&A7602X-H\03 ATC手册\A76XX_Series_AT_Command_Manual_V2.02.pdf`。
-- 实板已验证：HC32 UART4 115200 bit/s 经 CH340 临时桥接 AC7600 的 1.8 V TX；已确认 TCP 建连、平台注册 `register_ack`、心跳 `heartbeat_ack`、MSD 上传和 `msd_ack`。
-- 未验证不标为完成：真实 `ATD` 外呼、通话 URC 解析与拨号失败重试。
+- 当前策略：保持 PDP，按业务建立 TCP；每个 TCP 会话都重新注册，业务结束后只执行 `AT+CIPCLOSE=0`，不执行 `AT+NETCLOSE`。
+- 当前短连接模式不发送应用层 heartbeat；旧长连接的 `heartbeat_ack` 日志只作为历史实板证据。
+- 数据成功以完整关联的 `msd_ack` 为准；`+CIPSEND` 仅表示数据已交给模组 TCP 栈。
+- 语音不等待 `msd_ack`，但必须等待当前完整 AT 事务结束后才能使用同一 UART4。
+- 当前代码已实现 60 min 数据/语音尝试窗口和通话后的 60 min 回呼等待；本轮改动尚未编译、烧写或实板验证。
+- 原厂依据：`A76XX Series_TCPIP_Application Note_V1.05.pdf`、`A76XX_Series_AT_Command_Manual_V2.02.pdf`。
 
-## 总览
+## 1. 总体业务流程
 
 ```mermaid
-flowchart LR
-    A[KL15 ON / eCall 请求] --> B[阶段 1：基础入网]
-    B --> C[阶段 2：PDP 激活与地址确认]
-    C --> D[阶段 3：TCP 配置与建连]
-    D --> E[阶段 4：平台注册与心跳]
-    E --> F[阶段 5：MSD 上传]
-    F --> G[阶段 6：ATD 外呼与重试]
-
-    B -.实板已验证.-> C
-    C -.实板已验证.-> D
-    D -.实板已验证.-> E
-    E -.实板已验证.-> F
-    F -.MSD/ATD/远端振铃已实板观察；接通与重试待验证.-> G
+flowchart TD
+    A[KL15 ON / TBOX上电] --> B[AT同步、SIM检查、LTE注册]
+    B --> C[NETOPEN并保留PDP]
+    C --> D[CIPOPEN建立启动自检TCP]
+    D --> E[发送注册报文并等待register_ack]
+    E -->|成功| F[延时500 ms后CIPCLOSE]
+    E -->|失败或5 s超时| G[关闭TCP并记录失败]
+    F --> H[PDP保持，TCP关闭，后台GNSS/时间运行]
+    G --> H
+    H --> I{收到有效eCall触发?}
+    I -->|否| H
+    I -->|是| J[冻结触发、时间、GNSS/CAN快照和ser]
+    J --> K[数据路径：重建TCP、注册、上传MSD]
+    J --> L[语音路径：注册网络可用后独立ATD]
+    K --> M{完整关联msd_ack?}
+    M -->|是| N[数据成功，500 ms后关闭TCP]
+    M -->|否/15 s超时| O[关闭TCP，30 s/120 s后重试]
+    O -->|60 min内| K
+    O -->|窗口到期| P[数据尝试结束]
+    L --> Q[拨号/接通/释放原因判断]
+    Q -->|异常且60 min内| R[30 s首次，之后120 s重试]
+    R --> L
+    Q -->|正常释放| S[进入平台回呼等待]
+    S -->|RING/CRING/来电CLCC| T[ATA接听平台回拨]
+    T --> Q
+    S -->|60 min到期且无通话| U[结束本次eCall会话]
 ```
 
-## 第 4 阶段软件分层收口
-
-```text
-ModemTask
-  -> ModemService       网络启动、平台活动、休眠和通话的顶层编排
-       -> ModemNetwork  AT 同步、PDP、TCP 建连与传输断链恢复
-       -> ModemPlatform 注册、在线收发、心跳与 MSD 上传的私有状态机
-       -> ModemCall     独立通话状态机
-ModemNetwork / ModemPlatform / ModemCall
-  -> ModemPort          单笔 AT 事务、响应、URC 与超时
-```
-
-`ModemService` 只维护 `SLEEP -> NETWORK_STARTUP -> PLATFORM_ACTIVE` 三个业务大阶段；AT 同步、PDP 与 TCP 的细阶段
-完全由 `ModemNetwork` 私有维护。TCP 建连后，`ModemPlatform` 私有维护
-`REGISTERING -> ONLINE -> MSD_UPLOADING -> ONLINE`；服务层只用稳定在线查询决定休眠，
-并且只把平台失败事件提升为顶层状态变化。
-
-`ModemPort` 只把 `+IPCLOSE` 与 `+CGEV: ... PDN DEACT ...` 保存为原始传输事件；仅 `ModemNetwork`
-消费这些事件、等待当前 AT 事务空闲后从 `AT_SYNC` 重建，并向 `ModemService` 上报“传输恢复已开始”。
-因此 Service 不再直接读取 TCP/PDN URC，也不保存传输恢复子状态。语音处于拨号、通话或 `AT+CEER`
-查询期间，Service 只禁止 Network 启动已挂起的恢复，避免其 AT 事务抢占通话结果；语音终态后才允许恢复。
-
-KL15 延迟休眠只在平台处理前已经在线、且本周期处理后仍在线时累计。因此注册完成或 MSD 上传完成而刚进入
-`ONLINE` 的同一调度周期不会提前累计休眠时间，下一周期才开始执行在线休眠策略。
-
-## 阶段 1：基础入网（实板已验证）
+## 2. 上电自检、PDP与短连接注册
 
 ```mermaid
 sequenceDiagram
-    participant T as ModemTask
-    participant S as ModemService
-    participant P as ModemPort
-    participant M as AC7600
+    participant MT as ModemTask
+    participant MS as ModemService
+    participant MN as ModemNetwork
+    participant MP as ModemPlatform
+    participant Port as ModemPort/UART4
+    participant AC as AC7600
+    participant V as AECS平台
 
-    T->>S: KL15_ON / 请求联网
-    S->>P: AT（串口响应测试）
-    P->>M: AT
-    M-->>P: OK
-
-    S->>P: ATE0（关闭命令回显）
-    P->>M: ATE0
-    M-->>P: OK
-
-    S->>P: AT+CPIN?（查询 SIM 状态）
-    P->>M: AT+CPIN?
-    M-->>P: +CPIN: READY
-    M-->>P: OK
-
-    S->>P: AT+CSQ（查询信号质量）
-    P->>M: AT+CSQ
-    M-->>P: +CSQ: rssi,ber
-    M-->>P: OK
-
-    S->>P: AT+CEREG?（查询 LTE 注册）
-    P->>M: AT+CEREG?
-    M-->>P: +CEREG: n,1 或 n,5
-    M-->>P: OK
-    S->>S: NETWORK_REGISTERED
-```
-
-`+CEREG` 的注册状态为 `1`（本地）或 `5`（漫游）才进入 PDP 阶段；单独收到 `OK` 不代表已注册。
-
-## 阶段 2：PDP 激活与地址确认（实板已验证）
-
-```mermaid
-sequenceDiagram
-    participant S as ModemService
-    participant P as ModemPort
-    participant M as AC7600
-
-    S->>P: AT+NETOPEN?（查询 PDP 是否已打开）
-    P->>M: AT+NETOPEN?
-    M-->>P: +NETOPEN: 1 或 0
-    M-->>P: OK
-
-    alt PDP 已打开
-        S->>P: AT+NETCLOSE（关闭残留 PDP 与 socket）
-        P->>M: AT+NETCLOSE
-        M-->>P: OK
-        M-->>P: +NETCLOSE: 0
-        S->>S: PDP_CLOSED
-    else PDP 未打开
+    MT->>MS: KL15 ON，周期调度
+    MS->>MN: 请求网络在线
+    MN->>Port: AT / ATE0 / AT+CPIN? / AT+CSQ / AT+CEREG?
+    Port->>AC: 串行发送AT命令
+    AC-->>Port: SIM READY，CEREG=1或5
+    MN->>Port: AT+NETOPEN? / 必要时NETCLOSE / NETOPEN / IPADDR
+    AC-->>Port: +NETOPEN: 0，IP地址
+    MN->>Port: CTCPKA / CIPCFG / CIPRXGET=1 / CIPOPEN
+    AC->>V: 建立TCP
+    AC-->>Port: +CIPOPEN: 0,0
+    MN-->>MS: TCP_CONNECTED
+    MS->>MP: 开始本会话注册
+    MP->>Port: CIPSEND注册帧
+    Port->>AC: 01 + 长度 + {role,deviceId}
+    AC->>V: 注册数据
+    V-->>AC: register_ack
+    AC-->>Port: +CIPRXGET通知
+    MP->>Port: CIPRXGET=4查询长度，CIPRXGET=3读取数据
+    MP->>MP: 校验帧头、result=ok和deviceId
+    alt 5 s内注册成功
+        MP-->>MS: REGISTERED
+        MS->>MS: 安排500 ms关闭延时
+        MS->>MN: RequestTcpClose
+        MN->>Port: AT+CIPCLOSE=0
+        AC-->>Port: +CIPCLOSE: 0,0
+        MN-->>MS: TCP_CLOSED_PDP_RETAINED
+    else 负应答、字段不匹配或超时
+        MP-->>MS: PLATFORM_FAILURE
+        MS->>MN: 关闭当前TCP
     end
-
-    S->>P: AT+NETOPEN（激活干净 PDP）
-    P->>M: AT+NETOPEN
-    M-->>P: OK
-    M-->>P: +NETOPEN: 0
-    S->>S: PDP_OPENED
-
-    S->>P: AT+IPADDR（读取 PDP 地址）
-    P->>M: AT+IPADDR
-    M-->>P: IPv6 地址
-    M-->>P: IPv4 地址
-    M-->>P: OK
-    S->>S: PDP_IPADDR_READY / PDP_ACTIVE
 ```
 
-实板已观察到 IPv6 与 IPv4 双栈地址。每次新网络流程若发现 PDP 已打开，会先执行 `NETCLOSE` 清除残留 socket/PDP，再重新 `NETOPEN`；`NETOPEN` 的成功条件是异步结果 `+NETOPEN: 0`，而不是先返回的 `OK`。不使用 `CRESET`，仅在连续软恢复失败时再考虑模组复位。
+说明：`OK` 只代表命令已受理；`NETOPEN`、`CIPOPEN`、`CIPSEND` 和 `CIPCLOSE` 都必须分别等待对应异步结果。短连接关闭后 PDP 保留，下一次事件直接从 `CIPOPEN` 重建会话。
 
-## 阶段 3：TCP 配置与建连（实板已验证）
+## 3. 手动/自动触发、取消窗口与快照
 
 ```mermaid
 sequenceDiagram
-    participant S as ModemService
-    participant P as ModemPort
-    participant M as AC7600
-    participant V as 平台服务器
+    participant SRC as SOS/CAN/自动触发源
+    participant ET as EcallTask
+    participant TS as TimeService
+    participant GS as GnssService
+    participant CS as CanService
+    participant EC as Ecall状态机
+    participant MS as ModemService
 
-    S->>S: PDP_ACTIVE
-    S->>P: AT+CTCPKA=1,2,5,1（开启 TCP 保活）
-    P->>M: AT+CTCPKA=1,2,5,1
-    M-->>P: OK
-    S->>S: TCP_KEEPALIVE_READY
-
-    S->>P: AT+CIPCFG="DATAECHO",OFF（关闭 CIPSEND 数据回显）
-    P->>M: AT+CIPCFG="DATAECHO",OFF
-    M-->>P: OK
-    S->>S: TCP_CFG_READY
-
-    S->>P: AT+CIPOPEN=0,"TCP","8.137.175.163",8902
-    P->>M: AT+CIPOPEN=0,"TCP","8.137.175.163",8902
-    M-->>P: OK（命令已受理）
-    M->>V: TCP 建连
-    M-->>P: +CIPOPEN: 0,0（链路 0 建连成功）
-    P-->>S: 匹配任意 +CIPOPEN: 后判定结果码
-    S->>S: TCP_CONNECTED / PLATFORM_REGISTERING
-```
-
-`AT+CTCPKA=1,2,5,1` 的含义是：启用保活、空闲 2 分钟后探测、最多重试 5 次、探测间隔 1 分钟。`CIPOPEN` 必须等待 `+CIPOPEN: 0,0`；`+CIPOPEN: 0,<非零>` 会立即记录 `TCP_OPEN_RESULT_FAILED` 并进入休眠，避免误判或长时间等待。
-
-当前实现对 `CIPOPEN` 失败增加了 3 次受控重试，间隔 5 秒；保留已完成的 PDP 和 TCP 配置，耗尽后才进入 `SLEEP`。
-
-当前服务器 `8.137.175.163:8902` 是从 AECS 参考工程沿用的候选平台，已于上述样机试验中实际连接成功；其平台协议尚未冻结。
-
-## 阶段 4：平台注册、发送与接收（实板已验证）
-
-```mermaid
-sequenceDiagram
-    participant S as ModemService
-    participant P as ModemPort
-    participant M as AC7600
-    participant V as 平台服务器
-
-    S->>P: AT+CIPSEND=0,<length>（申请发送固定长度注册帧）
-    P->>M: AT+CIPSEND=0,<length>
-    M-->>P: >（允许写入负载）
-    P->>M: <length> 字节原始注册帧
-    M-->>P: OK
-    M-->>P: +CIPSEND: 0,<req>,<cnf>
-    P-->>S: 仅当 req == cnf 视为发送完成
-    M-->>V: 注册数据
-
-    V-->>M: 注册应答 / 平台数据
-    M-->>P: +CIPRXGET: 1,0（存在缓存数据）
-    S->>P: AT+CIPRXGET=4,0（查询未读长度）
-    S->>P: AT+CIPRXGET=3,0,<readLength>（读取十六进制数据）
-    M-->>P: +CIPRXGET: 3,0,<readLength>,0 + 十六进制负载 + OK
-    P-->>S: 还原字节并校验 AECS 类型/长度帧头
-    S->>S: 有界提取 JSON "type" 并记录语义线索
-```
-
-当前源码已实现候选注册发送：`01 + 4 字节大端 JSON 长度 + {"role":"device","deviceId":"7091"}`，经 `CIPSEND` 的 `>` 提示符发送，并以 `+CIPSEND: 0,req,cnf` 且 `req == cnf` 判定成功。TCP 建连前会先执行 `AT+CIPRXGET=1`，平台下行只上报 `+CIPRXGET: 1,<link>`；随后查询缓存长度，并对不超过 750 字节的数据使用 `AT+CIPRXGET=3,<link>,<length>` 读回十六进制文本、还原字节并校验候选 AECS 帧头。
-
-在帧头校验通过后，服务仅在帧内有界扫描 JSON 的 `"type":"..."`，最多记录 31 个可打印 ASCII 字符为 `PLATFORM_RX_TYPE:<value>`；不打印完整平台 JSON，也不因未知 `type` 改写当前 `ONLINE` 状态。实板已收到长度 127 的候选 AECS 帧，并确认其 `type` 为 `register_ack`；该回包的附加成功/失败字段语义仍未冻结。
-
-### ONLINE 内的候选心跳（实板已验证）
-
-```mermaid
-sequenceDiagram
-    participant S as ModemService
-    participant P as ModemPort
-    participant M as AC7600
-    participant V as 平台服务器
-
-    S->>S: ONLINE 空闲累计 25 s
-    S->>P: AT+CIPSEND=0,<heartbeatLength>
-    P->>M: AT+CIPSEND=0,<heartbeatLength>
-    M-->>P: >
-    P->>M: 02 + 长度 + {"type":"heartbeat","deviceId":"7091"}
-    M-->>P: OK + +CIPSEND: 0,<req>,<cnf>
-    P-->>S: req == cnf
-    S->>S: HEARTBEAT_SENT，重新累计 25 s
-    M->>V: TCP 心跳帧
-```
-
-心跳仅在平台接收空闲、没有待上传 MSD、且未请求 KL15 休眠时启动，因此不会与 `CIPRXGET` 或紧急业务竞争 UART AT 事务。CIPSEND 的提示符和长度确认与注册发送完全一致；任一步失败进入现有网络恢复路径。心跳帧内容、25 秒周期仍是 AECS 候选，需看服务器响应后再冻结。
-
-## 阶段 5：MSD、外呼与故障恢复（MSD 实板已验证）
-
-```mermaid
-sequenceDiagram
-    participant E as EcallTask
-    participant S as ModemService
-    participant P as ModemPort
-    participant M as AC7600
-
-    E->>S: 冻结 MSD，申请紧急服务
-    S->>P: AT+CIPSEND=0,116（申请固定长度 MSD 帧）
-    M-->>P: >
-    P->>M: 10 + 111 字节 MSD 候选负载
-    M-->>P: OK + +CIPSEND: 0,116,116
-    S->>S: 等待 msd_ack 后允许 ATD
-    S->>P: ATD<configuredNumber>;
-    M-->>P: OK（命令已受理）
-    M-->>P: +CLCC: ...,2/3,...（拨号中/远端振铃）
-    M-->>P: VOICE CALL: BEGIN 或 +CLCC: ...,0,...（接通）
-    M-->>P: VOICE CALL: END / NO CARRIER / +CLCC: ...,6,...（释放）
-    S->>P: AT+CEER 查询最后一次释放原因
-    alt +CEER 原因码 16 或 31（正常释放）
-        S-->>E: 呼叫结束事件，不重试
-    else 17/18/19/21 或未知原因
-        S->>S: 样机默认结束；开启重试后按 10 s / 30 s / 120 s 重试
+    SRC->>ET: 请求触发，记录最早系统tick
+    ET->>TS: 获取当前UTC
+    alt UTC已经有效
+        TS-->>ET: GNSS UTC或网络UTC
+        ET->>ET: 冻结触发UTC
+    else UTC尚未有效
+        TS-->>ET: INVALID
+        ET->>ET: 保留触发tick，稍后回算
     end
-
-    M-->>P: +CIPEVENT: NETWORK CLOSED UNEXPECTEDLY
-    P-->>S: 原始 TCP 关闭事件
-    S->>S: ModemNetwork 受控重连
-
-    M-->>P: +IPCLOSE: 0,<reason>
-    alt 语音拨号或通话中
-        S->>S: ModemNetwork 记录 TCP 关闭，待语音终态后重建
-    else 没有语音链路
-        S->>S: ModemNetwork: AT_SYNC → TCP 建连 → 平台重新注册
+    ET->>EC: 合并本批触发mask
+    alt 仅手动SOS
+        EC->>EC: 进入10 s取消窗口
+        alt 用户取消
+            EC-->>ET: 会话结束，不上传、不拨号
+        else 10 s到期
+            EC->>EC: WAIT_GNSS
+        end
+    else 自动/CAN触发
+        EC->>EC: 直接WAIT_GNSS
     end
-
-    M-->>P: +CGEV: ... PDN DEACT ...
-    S->>S: ModemNetwork: 等当前 AT 事务结束，AT_SYNC → NETCLOSE/NETOPEN 重建
+    ET->>GS: 最多等待3 s后读取当前点和T-1…T-9
+    ET->>CS: 读取新鲜事故字段
+    ET->>TS: 若触发UTC仍无效，再取当前UTC
+    TS-->>ET: 当前UTC或INVALID
+    ET->>ET: 当前UTC-触发后经过秒数，回算触发UTC；仍无效则填0
+    ET->>EC: 冻结完整MSD快照
+    EC->>MS: 请求紧急数据和语音流程
 ```
 
-当前 MSD 使用 AECS 参考工程的 111 字节负载布局：`version`、`identifier`、触发掩码、测试呼叫、车辆类型、17 字节 VIN、动力类型、UTC、经度、纬度、9 组历史点、Delta-V、乘员和翻滚。当前 TBOX 已有的触发掩码、UTC、经纬度会映射进帧；演示常量使用版本 `1`、标识 `1`、测试呼叫 `1` 与 VIN `LDC12345678900001`，其余当前没有来源的字段显式填零。外层帧使用消息类型 `0x10` 和 4 字节大端长度，因此 CIPSEND 总长度为 116 字节。
+同一事件的重连和重发复用已冻结 MSD、`ser` 和触发时间，不用重发时刻覆盖原始触发时刻。
 
-`+CIPSEND: 0,116,116` 证明模组已完整交付 MSD 给 TCP 栈；实板随后通过 `CIPRXGET=4/3` 读取 121 字节平台应答，解析到 `msd_ack`。紧急请求若撞上在途的心跳或下行读取，会等待该单笔事务结束后才进入 MSD，避免并发 AT；代码现改为只在 `msd_ack` 后发送 `ATD`。释放后查询 `AT+CEER`：根据原厂 AT 手册，原因码 `16` 与 `31 Normal unspecified` 均归类为正常结束。`+CLCC` 状态 `2/3` 会停止本地 30 秒误超时，等待终态 URC。
+## 4. MSD短连接上传与关联应答
 
-### 语音重试保留与当前不可测原因
+```mermaid
+sequenceDiagram
+    participant ET as EcallTask
+    participant MS as ModemService
+    participant MN as ModemNetwork
+    participant MP as ModemPlatform
+    participant Port as ModemPort
+    participant AC as AC7600
+    participant V as AECS平台
 
-语音重试状态机与 10 s、30 s、后续 120 s、累计 60 min 的参数已保留，但 `MODEM_AT_CFG_VOICE_RETRY_ENABLED` 当前固定为 `0U`。因此样机在拨号失败或 `AT+CEER` 返回 `17/18/19/21` 或未知原因时，输出 `VOICE_RETRY_DISABLED` 后结束本次呼叫，不会向个人演示号码重复外呼。
+    ET->>MS: RequestEmergencyCall(冻结MSD)
+    MS->>MP: 保存同一事件帧和ser
+    MS->>MN: PDP保留状态下请求TCP在线
+    MN->>Port: CIPOPEN
+    AC->>V: TCP连接
+    AC-->>Port: +CIPOPEN: 0,0
+    MS->>MP: 每个新TCP会话重新注册
+    MP->>V: register
+    V-->>MP: 合法register_ack
+    MP->>Port: CIPSEND动态长度MSD V0.2帧
+    Port->>AC: 0x10 + 4字节长度 + 111字节标准区 + TLV扩展
+    AC-->>Port: +CIPSEND: link,req,cnf
+    alt req等于cnf
+        MP->>MP: 开始15 s应用ACK计时
+        V-->>MP: msd_ack
+        MP->>MP: 校验type/result/deviceId/ser/identifier/triggerTimeUtc
+        alt 六项完整且匹配
+            MP-->>MS: MSD_ACK_CONFIRMED
+            MS->>MN: 500 ms后CIPCLOSE
+        else 缺字段、错ser、负应答或旧ACK
+            MP->>MP: 不确认，继续等待有效ACK
+        end
+    else CIPSEND失败
+        MP->>MP: 本次数据尝试失败
+    end
+    alt 15 s未取得合法ACK
+        MP-->>MS: MSD_ACK_TIMEOUT_CLOSE
+        MS->>MN: CIPCLOSE
+        MP->>MP: 首次等待30 s，后续等待120 s
+        Note over MP: 60 min总窗口不因断线、注册或语音而重置
+    end
+```
 
-当前不能把个人号码的“接通后挂断”作为重试验证：实板两次均已出现 `VOICE CALL: BEGIN` 和 `+CLCC: ...,0,...`，并由 `AT+CEER` 返回原厂手册示例中的 `31 Normal unspecified`。该结果属于正常释放，正确行为是不重拨。此前重复拨号进入留言，是旧判定将原因码 `31` 误作未知失败造成，不能作为语音失败重试已验证的证据。
+## 5. 数据与语音的AT口仲裁
 
-平台可能在语音仍进行时发送 `+IPCLOSE: 0,<reason>` 关闭数据 socket。样机现将该 URC 识别为 TCP 关闭：`ModemNetwork` 记录该原始传输事件，若语音拨号、通话或 `AT+CEER` 查询仍在进行，就延后恢复；语音终态后才进入 `AT_SYNC`、TCP 建连和平台注册。收到 `msd_ack` 后会清除本次 MSD 待上传标记，因此 TCP 恢复不会重放已完成 SOS 或再次发送 `ATD`。下一次新的 SOS 不会复用已关闭的 socket，避免 `AT+CIPSEND` 返回 `+CIPERROR: 4`。这条所有权收口待本次 IAR 编译和实板回归验证。
+```mermaid
+sequenceDiagram
+    participant MP as ModemPlatform
+    participant MC as ModemCall
+    participant Port as ModemPort
+    participant AC as AC7600
 
-平台在线时，心跳 `CIPSEND` 与 `CIPRXGET` 下行读取必须串行：心跳结果先完成并消费，才可读取已到达的下行通知；下行读取未完成时不得开始新心跳。拨号、通话和 `AT+CEER` 判定期间暂停平台 AT 事务，避免下行读取覆盖通话事务结果。该仲裁修复待实板长时间心跳回归验证。
+    MP->>Port: CIPSEND命令
+    AC-->>Port: >
+    MP->>Port: 二进制负载
+    AC-->>Port: +CIPSEND结果
+    Port-->>MP: 当前事务完成并由Platform消费
+    Note over MP,MC: 只有到这里才可切换AT所有者
+    MC->>Port: 音频准备AT
+    Port-->>MC: 完成
+    MC->>Port: ATD号码;
+    AC-->>Port: OK / CLCC / VOICE CALL URC
+```
 
-后续仅在用户重新授权号码与测试时机后，将 `MODEM_AT_CFG_VOICE_RETRY_ENABLED` 设为 `1U`，并使用关闭语音留言的关机号码、或其他可控失败号码。测试应确认首次没有进入 `VOICE CALL: BEGIN` 或 `+CLCC: ...,0,...`，且 `AT+CEER` 返回失败原因；随后依次核对 `VOICE_RETRY_WAIT`、10 秒后的 `VOICE_RETRY_START` 与第二次 `ATD`。第二次拨号可接通后挂断，并应以 `16` 或 `31` 结束且不再重拨。
+语音业务不以 `msd_ack` 为门槛；如果数据事务正在 `>` 提示符、负载发送或结果等待阶段，语音只等待该事务结束，不会插入其中。TCP关闭不等于语音挂断，代码不因 `CIPCLOSE` 主动发送 `ATH`。
 
-## 当前完成度与下一步
+## 6. 外呼、释放原因与平台回拨
 
-| 项目 | 状态 | 实际证据 / 约束 |
+```mermaid
+sequenceDiagram
+    participant EC as Ecall状态机
+    participant MC as ModemCall
+    participant Port as ModemPort
+    participant AC as AC7600
+    participant PSAP as 平台/接警中心
+
+    EC->>MC: 请求独立语音
+    MC->>Port: 音频路径准备
+    MC->>Port: ATD<号码>;
+    AC->>PSAP: 外呼
+    AC-->>Port: CLCC拨号/振铃/接通状态
+    AC-->>Port: VOICE CALL: BEGIN
+    Port-->>MC: CONNECTED
+    MC-->>EC: CALL_ACTIVE
+    PSAP-->>AC: 挂断
+    AC-->>Port: VOICE CALL: END / NO CARRIER
+    MC->>Port: AT+CEER
+    alt 正常释放
+        MC-->>EC: CALL_ENDED
+        EC->>EC: CALLBACK_STANDBY，启动60 min
+        Note over EC,AC: 保持模组可注册入网并等待平台回拨
+        PSAP->>AC: 平台回拨
+        AC-->>Port: RING / +CRING / 来电CLCC
+        Port-->>MC: INCOMING
+        MC->>Port: 音频准备后ATA
+        AC-->>Port: OK / 接通URC
+        MC-->>EC: CALL_ACTIVE
+    else 异常释放且仍在60 min语音窗口
+        MC->>MC: 首次30 s、后续120 s等待
+        MC->>Port: 再次ATD
+    end
+    alt 回呼等待满60 min且当前无通话
+        EC->>MC: 退出CALLBACK_STANDBY
+        MC-->>EC: IDLE
+        EC->>EC: COMPLETE后回到STANDBY
+    end
+```
+
+平台来电通过 `RING`、`+CRING:` 或 `+CLCC` 来电方向/状态识别。`ATA`失败且尚未接通时返回回呼等待，不把一次接听失败误转为主动外呼重试。
+
+## 7. TCP/PDP异常恢复
+
+```mermaid
+flowchart TD
+    A[收到IPCLOSE或CIPEVENT] --> B{语音AT事务进行中?}
+    B -->|是| C[记录传输丢失，等待语音终态]
+    B -->|否| D[ModemNetwork重新AT同步]
+    C --> D
+    D --> E{PDP仍有效?}
+    E -->|是| F[重新CIPOPEN]
+    E -->|否或PDN DEACT| G[NETCLOSE清理后NETOPEN]
+    G --> F
+    F --> H[每个新TCP会话重新注册]
+    H --> I{有待确认MSD?}
+    I -->|是| J[重发同一冻结帧和ser]
+    I -->|否| K[按短连接策略关闭TCP]
+```
+
+## 8. 当前验证状态
+
+| 流程 | 状态 | 说明 |
 |---|---|---|
-| UART4 AT 收发 | 已验证 | AC7600 对基础 AT 和 TCP AT 均有实机响应。|
-| LTE 注册 | 已验证 | `+CEREG: 0,1`。|
-| PDP | 已验证 | `NETOPEN?`、`NETOPEN`、`IPADDR` 已完成；观察到 IPv4/IPv6 地址。|
-| TCP | 已验证 | `CTCPKA`、`CIPCFG`、`CIPOPEN`；收到 `+CIPOPEN: 0,0`。|
-| RTT 日志 | 已调整 | HMI 队列 32 条、RTT 上行缓冲 4 KiB；仍需长时间无断点观察。|
-| 平台注册 | 已实板验证 | 注册帧发送完成后，实测收到 `register_ack`；附加字段语义尚未冻结。|
-| CIPSEND | 已实板验证 | 已实测 `>`、固定长度原始数据与 `+CIPSEND` 长度确认。|
-| 接收事件/长度 | 已实板验证 | 已实测 `CIPRXGET=1` 缓冲下行与 `CIPRXGET=4` 长度查询。|
-| 接收内容/帧头 | 已实板验证 | 使用 `CIPRXGET=3` 读取最多 750 字节十六进制内容；已收到并通过 127 字节候选 AECS 类型/长度帧头校验。|
-| 平台应答 type | 已实板验证 | 帧头有效后有界提取 JSON `type`；实测注册回包为 `register_ack`，附加字段语义尚未冻结。|
-| 平台心跳 | 已实板验证 | ONLINE 空闲 25 秒后发送候选 43 字节 `0x02` 心跳帧，连续收到 `heartbeat_ack`；与下行接收、MSD 和 KL15 休眠互斥。|
-| MSD 上报 | 已实板验证 | 发送 116 字节候选 MSD 帧，实测 `+CIPSEND: 0,116,116` 后读取并解析到 121 字节 `msd_ack`。|
-| ATD / 单次拨号 | 已实现，实板已振铃 | `msd_ack` 后已观察到 `+CLCC` 状态 `3`；本次被叫未接听，后续收到状态 `6`、`VOICE CALL: END` 与 `NO CARRIER`。|
-| 拨号失败重试 | 已实现，默认关闭 | 重试状态机保留；样机以 `MODEM_AT_CFG_VOICE_RETRY_ENABLED=0U` 结束失败呼叫，避免个人号码重复外呼。开启后，`17/18/19/21` 与未知原因按 SRS 10s/30s/120s 时序重拨，累计窗口为 60min；尚未实板验证。|
+| UART、SIM、LTE、PDP、旧长连接注册/心跳/MSD | 有历史实板证据 | 不能替代当前短连接V0.2回归。 |
+| PDP保持、TCP短连接、每会话注册 | 已实现并有软件验证 | 待实板验证 `CIPCLOSE` 后不执行 `NETCLOSE`。 |
+| V0.2动态MSD、严格关联ACK、拆包/粘包 | 已实现并有软件验证 | 后台需按V0.2生成完整ACK。 |
+| 数据/语音独立和30 s/120 s/60 min重试 | 已实现并有软件验证 | 待受控实板验证。 |
+| 60 min回呼等待、来电识别和ATA | 已实现、未编译 | 待编译和平台真实回拨验证。 |
+| UTC低频校时和MSD触发时间冻结 | 已实现、未编译 | 详见 `AC7600_GNSS_SWIMLANE.md`。 |

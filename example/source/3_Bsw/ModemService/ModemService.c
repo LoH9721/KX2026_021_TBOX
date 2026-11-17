@@ -41,6 +41,8 @@ typedef struct
     uint8_t u8TcpCloseStarted;
     uint32_t u32TcpCloseStartMs;
     uint32_t u32TcpCloseDelayMs;
+    volatile uint8_t u8CallbackStandbyUpdatePending;
+    volatile uint8_t u8CallbackStandbyRequested;
 } ModemServiceRuntime_t;
 
 typedef struct
@@ -288,6 +290,7 @@ static void ModemService_ProcessTcpClose(void)
 *******************************************************/
 static void ModemService_ProcessOnlineSleep(void)
 {
+    /* CALLBACK_STANDBY is intentionally excluded so the modem remains ready for platform return calls. */
     if ((s_mSvcRun.u8NetworkSleepRequested != 0U)
         && (ModemPlatform_HasPendingMsd() == 0U)
         && ((s_mSvcSts.enCallState == MODEM_CALL_IDLE)
@@ -349,6 +352,7 @@ void ModemService_RequestEmergencyCall(const EcallMsd_t *pstMsd)
     taskENTER_CRITICAL();
     if ((s_mSvcRun.u8NewEmergencyRequested == 0U)
         && ((s_mSvcSts.enCallState == MODEM_CALL_IDLE)
+            || (s_mSvcSts.enCallState == MODEM_CALL_CALLBACK_STANDBY)
             || (s_mSvcSts.enCallState == MODEM_CALL_ENDED)
             || (s_mSvcSts.enCallState == MODEM_CALL_FAILED)))
     {
@@ -388,6 +392,63 @@ void ModemService_RequestNetworkSleep(void)
         s_mSvcRun.u8NetworkSleepRequested = 1U;
         s_mSvcRun.u32NetworkSleepHoldMs = 0U;
         HMI_LOG_MODEM("KL15_OFF_HOLD\r\n");
+    }
+}
+
+/*******************************************************
+  * Name    :ModemService_SetCallbackStandby
+  * Author  :LoH
+  * Function:Post one callback-standby state update from EcallTask to ModemTask.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+void ModemService_SetCallbackStandby(uint8_t u8Active)
+{
+    taskENTER_CRITICAL();
+    s_mSvcRun.u8CallbackStandbyRequested = (u8Active != 0U) ? 1U : 0U;
+    s_mSvcRun.u8CallbackStandbyUpdatePending = 1U;
+    taskEXIT_CRITICAL();
+}
+
+/*******************************************************
+  * Name    :ModemService_ConsumeCallbackStandbyUpdate
+  * Author  :LoH
+  * Function:Apply callback standby only in the task that owns the modem call state.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+static void ModemService_ConsumeCallbackStandbyUpdate(void)
+{
+    uint8_t u8Pending;
+    uint8_t u8Requested;
+
+    taskENTER_CRITICAL();
+    u8Pending = s_mSvcRun.u8CallbackStandbyUpdatePending;
+    u8Requested = s_mSvcRun.u8CallbackStandbyRequested;
+    s_mSvcRun.u8CallbackStandbyUpdatePending = 0U;
+    taskEXIT_CRITICAL();
+
+    if (u8Pending == 0U)
+    {
+        return;
+    }
+
+    if (u8Requested != 0U)
+    {
+        if ((s_mSvcSts.enCallState == MODEM_CALL_IDLE)
+            || (s_mSvcSts.enCallState == MODEM_CALL_ENDED)
+            || (s_mSvcSts.enCallState == MODEM_CALL_FAILED))
+        {
+            s_mSvcSts.enCallState = MODEM_CALL_CALLBACK_STANDBY;
+            HMI_LOG_MODEM("CALLBACK_STANDBY_STARTED\r\n");
+        }
+    }
+    else if (s_mSvcSts.enCallState == MODEM_CALL_CALLBACK_STANDBY)
+    {
+        ModemCall_Reset();
+        (void)ModemPort_TakeVoiceEvent();
+        s_mSvcSts.enCallState = MODEM_CALL_IDLE;
+        HMI_LOG_MODEM("CALLBACK_STANDBY_STOPPED\r\n");
     }
 }
 
@@ -433,6 +494,7 @@ static void ModemService_ConsumeEmergencyRequest(void)
 void ModemService_Process(void)
 {
     ModemService_ConsumeEmergencyRequest();
+    ModemService_ConsumeCallbackStandbyUpdate();
     ModemPower_Process();
     ModemPlatform_Tick();
 

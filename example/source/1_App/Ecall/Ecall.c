@@ -258,7 +258,9 @@ void Ecall_OnGnssTimeout(void)
 *******************************************************/
 void Ecall_OnCallActive(void)
 {
-    if ((m_u8SessionActive != 0U) && (m_enEcallState == ECALL_STATE_WAIT_CALL_ACTIVE))
+    if ((m_u8SessionActive != 0U)
+        && ((m_enEcallState == ECALL_STATE_WAIT_CALL_ACTIVE)
+            || (m_enEcallState == ECALL_STATE_CALLBACK_STANDBY)))
     {
         m_enEcallState = ECALL_STATE_IN_CALL;
         CanService_SetEcallStatus(CAN_SERVICE_ECALL_ON_THE_PHONE);
@@ -269,7 +271,7 @@ void Ecall_OnCallActive(void)
 /*******************************************************
   * Name    :Ecall_OnCallEnded
   * Author  :LoH
-  * Function:Complete active session after call ends.
+  * Function:Keep the powered eCall session available for one platform callback window.
   * Version :V1.0.0
   * Data    :2026.08.26
 *******************************************************/
@@ -278,6 +280,36 @@ void Ecall_OnCallEnded(void)
     if (m_u8SessionActive != 0U)
     {
         Hmi_SetEcallCancelWindow(0U);
+        m_enEcallState = ECALL_STATE_CALLBACK_STANDBY;
+        CanService_SetEcallStatus(CAN_SERVICE_ECALL_END_OF_CALL);
+        Hmi_ShowEcallState(m_enEcallState);
+        ModemService_SetCallbackStandby(1U);
+    }
+}
+
+/*******************************************************
+  * Name    :Ecall_OnCallbackStandbyExpired
+  * Author  :LoH
+  * Function:Complete the eCall session after at least sixty minutes of callback standby.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+void Ecall_OnCallbackStandbyExpired(void)
+{
+    ModemCallState_t enCallState;
+
+    if ((m_u8SessionActive != 0U) && (m_enEcallState == ECALL_STATE_CALLBACK_STANDBY))
+    {
+        enCallState = ModemService_GetCallState();
+        if (enCallState == MODEM_CALL_CALLBACK_STANDBY)
+        {
+            ModemService_SetCallbackStandby(0U);
+            return;
+        }
+        if (enCallState != MODEM_CALL_IDLE)
+        {
+            return;
+        }
         m_enEcallState = ECALL_STATE_COMPLETE;
         CanService_SetEcallStatus(CAN_SERVICE_ECALL_END_OF_CALL);
         Hmi_ShowEcallState(m_enEcallState);
@@ -285,6 +317,7 @@ void Ecall_OnCallEnded(void)
         m_u8SessionActive = 0U;
         m_u8CallRequestSent = 0U;
         m_enEcallState = ECALL_STATE_STANDBY;
+        HMI_LOG_ECALL("CALLBACK_STANDBY_EXPIRED\r\n");
         Hmi_ShowEcallState(m_enEcallState);
     }
 }
@@ -301,6 +334,7 @@ void Ecall_OnCallFailed(void)
     if (m_u8SessionActive != 0U)
     {
         Hmi_SetEcallCancelWindow(0U);
+        ModemService_SetCallbackStandby(0U);
         m_enEcallState = ECALL_STATE_FAILED;
         CanService_SetEcallStatus(CAN_SERVICE_ECALL_END_OF_CALL);
         Hmi_ShowEcallState(m_enEcallState);

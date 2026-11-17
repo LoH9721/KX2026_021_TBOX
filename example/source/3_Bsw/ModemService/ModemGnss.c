@@ -367,10 +367,12 @@ void ModemGnss_Process(uint8_t u8StartAllowed)
             {
                 s_mGnssRun.u8PowerReady = 0U;
                 s_mGnssRun.u8PositionLogSilent = 0U;
+                OutputService_SetGnssReady(0U);
                 ModemGnss_EnterQueryHold();
             }
             else if (ModemPort_IsIdle() != 0U)
             {
+                OutputService_SetGnssReady(1U);
                 if (ModemGnss_ParsePosition(ModemPort_GetLastMatchedResponse(), &stSample) != 0U)
                 {
                     portENTER_CRITICAL();
@@ -417,17 +419,31 @@ uint8_t ModemGnss_IsBusy(void)
 *******************************************************/
 void ModemGnss_AbortForEmergency(void)
 {
+    ModemGnssStep_t enInterruptedStep;
+
     if (ModemGnss_IsBusy() == 0U)
     {
         return;
     }
 
-    (void)ModemPort_AbortActiveCommand();
-    s_mGnssRun.u8PowerReady = 0U;
-    s_mGnssRun.u8PositionLogSilent = 0U;
+    enInterruptedStep = s_mGnssRun.enStep;
+    if (ModemPort_AbortActiveCommand() == 0U)
+    {
+        return;
+    }
+    if (enInterruptedStep == MODEM_GNSS_STEP_POWER_ON_WAIT)
+    {
+        /* CGNSSPWR takes effect immediately; resume polling without another power cycle. */
+        s_mGnssRun.u8PowerReady = 1U;
+    }
+    else if (enInterruptedStep == MODEM_GNSS_STEP_POWER_OFF_WAIT)
+    {
+        s_mGnssRun.u8PowerReady = 0U;
+        s_mGnssRun.u8PositionLogSilent = 0U;
+        OutputService_SetGnssReady(0U);
+    }
     s_mGnssRun.u32QueryHoldMs = osKernelSysTick();
     s_mGnssRun.enStep = MODEM_GNSS_STEP_QUERY_HOLD;
-    OutputService_SetGnssReady(0U);
     HMI_LOG_MODEM("GNSS_BACKGROUND_PREEMPTED\r\n");
 }
 

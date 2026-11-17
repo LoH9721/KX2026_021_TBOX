@@ -16,6 +16,7 @@ typedef enum
     MODEM_CALL_PREPARING,
     MODEM_CALL_DIALING,
     MODEM_CALL_ACTIVE,
+    MODEM_CALL_CALLBACK_STANDBY,
     MODEM_CALL_ENDED,
     MODEM_CALL_FAILED
 } ModemCallState_t;
@@ -35,6 +36,8 @@ void ModemService_RequestEmergencyCall(const EcallMsd_t *pstMsd);
 void ModemService_RequestNetworkOnline(void);
 /* Request normal KL15-controlled network sleep after pending work. */
 void ModemService_RequestNetworkSleep(void);
+/* Enable or stop the post-call platform callback standby state. */
+void ModemService_SetCallbackStandby(uint8_t u8Active);
 /* Process modem call state in ModemTask context. */
 void ModemService_Process(void);
 /* Return the current modem call state. */

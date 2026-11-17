@@ -39,6 +39,7 @@ typedef struct
     uint8_t u8AudioReady;
     uint8_t u8VoiceProgressObserved;
     uint8_t u8WasConnected;
+    uint8_t u8IncomingAnswer;
     uint32_t u32RetryStartMs;
     uint32_t u32RetryHoldStartMs;
     uint8_t u8RetryCount;
@@ -153,12 +154,20 @@ static uint32_t ModemCall_GetRetryDelayMs(uint8_t u8RetryCount)
 /*******************************************************
   * Name    :ModemCall_EnterRetryWait
   * Author  :LoH
-  * Function:Schedule one independent voice connection retry within the SRS window.
+  * Function:Retry abnormal releases, or return one failed incoming answer to callback standby.
   * Version :V1.0.0
   * Data    :2026.11.14
 *******************************************************/
 static void ModemCall_EnterRetryWait(ModemCallState_t *penCallState)
 {
+    if ((s_mCallRun.u8IncomingAnswer != 0U) && (s_mCallRun.u8WasConnected == 0U))
+    {
+        ModemCall_EnterTerminalState(penCallState, MODEM_CALL_CALLBACK_STANDBY);
+        HMI_LOG_MODEM("CALLBACK_ANSWER_FAILED\r\n");
+        return;
+    }
+
+    s_mCallRun.u8IncomingAnswer = 0U;
     if (s_mCallRun.u8WasConnected != 0U)
     {
         s_mCallRun.u8WasConnected = 0U;
@@ -223,6 +232,7 @@ void ModemCall_Start(ModemCallState_t *penCallState)
 {
     if (penCallState != 0)
     {
+        (void)ModemPort_TakeVoiceEvent();
         ModemAudio_Reset();
         s_mCallRun.enStep = MODEM_CALL_STEP_AUDIO_QUEUE;
         s_mCallRun.u8AudioReady = 0U;
@@ -232,15 +242,40 @@ void ModemCall_Start(ModemCallState_t *penCallState)
         s_mCallRun.u32RetryElapsedMs = 0U;
         s_mCallRun.u8RetryCount = 0U;
         s_mCallRun.u8WasConnected = 0U;
+        s_mCallRun.u8IncomingAnswer = 0U;
         s_mCallRun.u32RetryStartMs = osKernelSysTick();
         *penCallState = MODEM_CALL_DIALING;
     }
 }
 
 /*******************************************************
+  * Name    :ModemCall_StartIncomingAnswer
+  * Author  :LoH
+  * Function:Prepare verified audio and answer one incoming platform callback with ATA.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+static void ModemCall_StartIncomingAnswer(ModemCallState_t *penCallState)
+{
+    ModemAudio_Reset();
+    s_mCallRun.enStep = MODEM_CALL_STEP_AUDIO_QUEUE;
+    s_mCallRun.u8AudioReady = 0U;
+    s_mCallRun.u8VoiceProgressObserved = 0U;
+    s_mCallRun.u8WasConnected = 0U;
+    s_mCallRun.u8IncomingAnswer = 1U;
+    s_mCallRun.u32VoiceWaitMs = 0U;
+    s_mCallRun.u32RetryHoldMs = 0U;
+    s_mCallRun.u32RetryElapsedMs = 0U;
+    s_mCallRun.u8RetryCount = 0U;
+    s_mCallRun.u32RetryStartMs = osKernelSysTick();
+    *penCallState = MODEM_CALL_DIALING;
+    HMI_LOG_MODEM("CALLBACK_RING_DETECTED\r\n");
+}
+
+/*******************************************************
   * Name    :ModemCall_Process
   * Author  :LoH
-  * Function:Verify U22 external-speaker audio, send ATD, and classify AC7600 voice-call command and URC results.
+  * Function:Verify U22 audio, send ATD or ATA, and classify AC7600 call results.
   * Version :V1.0.0
   * Data    :2026.11.14
 *******************************************************/
@@ -252,6 +287,16 @@ void ModemCall_Process(ModemCallState_t *penCallState, uint8_t u8PortAllowed)
 
     if (penCallState == 0)
     {
+        return;
+    }
+
+    if (*penCallState == MODEM_CALL_CALLBACK_STANDBY)
+    {
+        enVoiceEvent = ModemPort_TakeVoiceEvent();
+        if (enVoiceEvent == MODEM_PORT_VOICE_EVENT_INCOMING)
+        {
+            ModemCall_StartIncomingAnswer(penCallState);
+        }
         return;
     }
 
@@ -329,21 +374,38 @@ void ModemCall_Process(ModemCallState_t *penCallState, uint8_t u8PortAllowed)
 
         case MODEM_CALL_STEP_QUEUE:
             ModemPort_ClearFailure();
-            i32Length = snprintf(s_mCallRun.acDialCommand,
-                                 sizeof(s_mCallRun.acDialCommand),
-                                 MODEM_AT_CMD_DIAL_FORMAT,
-                                 MODEM_PLATFORM_DIAL_NUMBER);
-            if ((i32Length <= 0)
-                || ((uint32_t)i32Length >= sizeof(s_mCallRun.acDialCommand))
-                || (ModemPort_QueueCommand(s_mCallRun.acDialCommand,
-                                           MODEM_AT_RSP_OK,
-                                           MODEM_AT_CFG_DIAL_TIMEOUT_MS) == 0U))
+            if (s_mCallRun.u8IncomingAnswer != 0U)
             {
-                ModemCall_EnterRetryWait(penCallState);
+                if (ModemPort_QueueCommand(MODEM_AT_CMD_ANSWER_CALL,
+                                           MODEM_AT_RSP_OK,
+                                           MODEM_AT_CFG_ANSWER_TIMEOUT_MS) == 0U)
+                {
+                    ModemCall_EnterRetryWait(penCallState);
+                }
+                else
+                {
+                    s_mCallRun.enStep = MODEM_CALL_STEP_WAIT_COMMAND;
+                    HMI_LOG_MODEM("CALLBACK_ANSWER_REQUESTED\r\n");
+                }
             }
             else
             {
-                s_mCallRun.enStep = MODEM_CALL_STEP_WAIT_COMMAND;
+                i32Length = snprintf(s_mCallRun.acDialCommand,
+                                     sizeof(s_mCallRun.acDialCommand),
+                                     MODEM_AT_CMD_DIAL_FORMAT,
+                                     MODEM_PLATFORM_DIAL_NUMBER);
+                if ((i32Length <= 0)
+                    || ((uint32_t)i32Length >= sizeof(s_mCallRun.acDialCommand))
+                    || (ModemPort_QueueCommand(s_mCallRun.acDialCommand,
+                                               MODEM_AT_RSP_OK,
+                                               MODEM_AT_CFG_DIAL_TIMEOUT_MS) == 0U))
+                {
+                    ModemCall_EnterRetryWait(penCallState);
+                }
+                else
+                {
+                    s_mCallRun.enStep = MODEM_CALL_STEP_WAIT_COMMAND;
+                }
             }
             break;
 
@@ -359,7 +421,7 @@ void ModemCall_Process(ModemCallState_t *penCallState, uint8_t u8PortAllowed)
             }
             else
             {
-                /* Wait for the ATD command response. */
+                /* Wait for the ATD or ATA command response. */
             }
             break;
 
@@ -438,13 +500,15 @@ void ModemCall_Process(ModemCallState_t *penCallState, uint8_t u8PortAllowed)
             break;
 
         case MODEM_CALL_STEP_AUDIO_OFF_QUEUE:
+            ModemPort_ClearTransactionFailure();
             if (ModemAudio_RequestSpeakerOff() != 0U)
             {
                 s_mCallRun.enStep = MODEM_CALL_STEP_AUDIO_OFF_WAIT;
             }
             else
             {
-                *penCallState = MODEM_CALL_FAILED;
+                *penCallState = (s_mCallRun.enTerminalState == MODEM_CALL_CALLBACK_STANDBY)
+                    ? MODEM_CALL_CALLBACK_STANDBY : MODEM_CALL_FAILED;
                 s_mCallRun.enStep = MODEM_CALL_STEP_IDLE;
                 HMI_LOG_MODEM("AUDIO_SPEAKER_OFF_FAILED\r\n");
             }
@@ -458,7 +522,8 @@ void ModemCall_Process(ModemCallState_t *penCallState, uint8_t u8PortAllowed)
             }
             else if (ModemAudio_HasFailure() != 0U)
             {
-                *penCallState = MODEM_CALL_FAILED;
+                *penCallState = (s_mCallRun.enTerminalState == MODEM_CALL_CALLBACK_STANDBY)
+                    ? MODEM_CALL_CALLBACK_STANDBY : MODEM_CALL_FAILED;
                 s_mCallRun.enStep = MODEM_CALL_STEP_IDLE;
                 HMI_LOG_MODEM("AUDIO_SPEAKER_OFF_FAILED\r\n");
             }

@@ -280,6 +280,10 @@ void Hmi_ShowEcallState(EcallState_t enState)
     {
         HMI_LOG_ECALL("IN_CALL\r\n");
     }
+    else if (enState == ECALL_STATE_CALLBACK_STANDBY)
+    {
+        HMI_LOG_ECALL("CALLBACK_STANDBY\r\n");
+    }
     else if (enState == ECALL_STATE_COMPLETE)
     {
         HMI_LOG_ECALL("COMPLETE\r\n");

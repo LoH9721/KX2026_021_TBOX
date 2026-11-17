@@ -12,14 +12,60 @@
 #include "GnssService.h"
 #include "Hmi.h"
 #include "TaskManager.h"
+#include "TimeService.h"
 #include <string.h>
 
 #define ECALL_TASK_GNSS_WAIT_TIMEOUT_MS 3000U
+#define ECALL_TASK_CALLBACK_RECHECK_MS    100U
 
 osMessageQDef(EcallTaskEventQueue, 8U, uint32_t);
 static osMessageQId m_xEcallEventQueue;
 static uint8_t m_u8PendingTriggerMask = 0U;
 static uint8_t m_u8TriggerWakePending = 0U;
+
+typedef struct
+{
+    uint32_t u32PendingTriggerMs;
+    uint32_t u32SessionTriggerMs;
+    uint32_t u32SessionTriggerUtc;
+    uint8_t u8SessionTriggerCaptured;
+} EcallTaskTriggerTimeRuntime_t;
+
+static EcallTaskTriggerTimeRuntime_t s_mEcallTaskTriggerTimeRun;
+
+/*******************************************************
+  * Name    :EcallTask_GetTriggerUtc
+  * Author  :LoH
+  * Function:Freeze or reconstruct the session trigger UTC without delaying eCall.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+static uint32_t EcallTask_GetTriggerUtc(void)
+{
+    uint32_t u32CurrentUtc;
+    uint32_t u32ElapsedSeconds;
+
+    if (s_mEcallTaskTriggerTimeRun.u8SessionTriggerCaptured == 0U)
+    {
+        return 0U;
+    }
+    if (s_mEcallTaskTriggerTimeRun.u32SessionTriggerUtc != 0U)
+    {
+        return s_mEcallTaskTriggerTimeRun.u32SessionTriggerUtc;
+    }
+    if (TimeService_GetUtcSeconds(&u32CurrentUtc) == TIME_SERVICE_SOURCE_INVALID)
+    {
+        return 0U;
+    }
+
+    u32ElapsedSeconds = (osKernelSysTick() - s_mEcallTaskTriggerTimeRun.u32SessionTriggerMs) / 1000UL;
+    if (u32CurrentUtc <= u32ElapsedSeconds)
+    {
+        return 0U;
+    }
+    s_mEcallTaskTriggerTimeRun.u32SessionTriggerUtc = u32CurrentUtc - u32ElapsedSeconds;
+    return s_mEcallTaskTriggerTimeRun.u32SessionTriggerUtc;
+}
 
 /*******************************************************
   * Name    :EcallTask_GetMsdSnapshot
@@ -40,6 +86,7 @@ static uint8_t EcallTask_GetMsdSnapshot(EcallMsd_t *pstMsd)
 
     (void)memset(pstMsd, 0, sizeof(*pstMsd));
     u8GnssValid = GnssService_GetLatest(pstMsd);
+    pstMsd->utc_seconds = EcallTask_GetTriggerUtc();
     pstMsd->delta_v_longitudinal_raw = 0U;
     pstMsd->delta_v_lateral_raw = 0U;
     pstMsd->occupants = 0xFFU;
@@ -90,16 +137,25 @@ static uint8_t EcallTask_GetTriggerMask(EcallTrigger_t enTrigger)
 *******************************************************/
 static void EcallTask_ProcessPendingTriggers(void)
 {
+    uint32_t u32PendingTriggerMs;
     uint8_t u8TriggerMask;
 
     portENTER_CRITICAL();
     u8TriggerMask = m_u8PendingTriggerMask;
+    u32PendingTriggerMs = s_mEcallTaskTriggerTimeRun.u32PendingTriggerMs;
     m_u8PendingTriggerMask = 0U;
     m_u8TriggerWakePending = 0U;
     portEXIT_CRITICAL();
 
     if (u8TriggerMask != 0U)
     {
+        if (Ecall_IsSessionActive() == 0U)
+        {
+            s_mEcallTaskTriggerTimeRun.u32SessionTriggerMs = u32PendingTriggerMs;
+            s_mEcallTaskTriggerTimeRun.u32SessionTriggerUtc = 0U;
+            s_mEcallTaskTriggerTimeRun.u8SessionTriggerCaptured = 1U;
+            (void)EcallTask_GetTriggerUtc();
+        }
         Ecall_OnTriggerMask(u8TriggerMask);
     }
 }
@@ -117,10 +173,12 @@ static void EcallTask_Entry(void const *argument)
     EcallMsd_t stMsd;
     uint32_t u32CancelWindowDeadline = 0U;
     uint32_t u32GnssDeadline = 0U;
+    uint32_t u32CallbackDeadline = 0U;
     uint32_t u32CurrentTick;
     uint32_t u32WaitMs;
     uint8_t u8CancelWindowTimerActive = 0U;
     uint8_t u8GnssTimerActive = 0U;
+    uint8_t u8CallbackTimerActive = 0U;
     uint8_t u8GnssValid;
 
     (void)argument;
@@ -162,10 +220,37 @@ static void EcallTask_Entry(void const *argument)
             }
             u32WaitMs = u32GnssDeadline - u32CurrentTick;
         }
+        else if (Ecall_GetState() == ECALL_STATE_CALLBACK_STANDBY)
+        {
+            u32CurrentTick = osKernelSysTick();
+            if (u8CallbackTimerActive == 0U)
+            {
+                u32CallbackDeadline = u32CurrentTick + ECALL_CALLBACK_STANDBY_MS;
+                u8CallbackTimerActive = 1U;
+            }
+            if ((int32_t)(u32CallbackDeadline - u32CurrentTick) <= 0)
+            {
+                Ecall_OnCallbackStandbyExpired();
+                if (Ecall_GetState() != ECALL_STATE_CALLBACK_STANDBY)
+                {
+                    u8CallbackTimerActive = 0U;
+                    continue;
+                }
+                u32WaitMs = ECALL_TASK_CALLBACK_RECHECK_MS;
+            }
+            else
+            {
+                u32WaitMs = u32CallbackDeadline - u32CurrentTick;
+            }
+        }
         else
         {
             u8CancelWindowTimerActive = 0U;
             u8GnssTimerActive = 0U;
+            if (Ecall_GetState() != ECALL_STATE_IN_CALL)
+            {
+                u8CallbackTimerActive = 0U;
+            }
             u32WaitMs = osWaitForever;
         }
 
@@ -217,7 +302,15 @@ static void EcallTask_Entry(void const *argument)
                 Ecall_OnGnssResult(&stMsd, u8GnssValid);
                 u8GnssTimerActive = 0U;
             }
-            else
+            else if (Ecall_GetState() == ECALL_STATE_CALLBACK_STANDBY)
+            {
+                Ecall_OnCallbackStandbyExpired();
+                if (Ecall_GetState() != ECALL_STATE_CALLBACK_STANDBY)
+                {
+                    u8CallbackTimerActive = 0U;
+                }
+            }
+            else if (Ecall_GetState() == ECALL_STATE_MANUAL_CANCEL_WINDOW)
             {
                 Ecall_OnManualCancelTimeout();
                 u8CancelWindowTimerActive = 0U;
@@ -238,6 +331,7 @@ void EcallTask_Create(void)
     m_xEcallEventQueue = osMessageCreate(osMessageQ(EcallTaskEventQueue), NULL);
     m_u8PendingTriggerMask = 0U;
     m_u8TriggerWakePending = 0U;
+    (void)memset(&s_mEcallTaskTriggerTimeRun, 0, sizeof(s_mEcallTaskTriggerTimeRun));
     osThreadDef(EcallTask, EcallTask_Entry, osPriorityHigh, 0U, 512U);
     (void)osThreadCreate(osThread(EcallTask), NULL);
 }
@@ -266,6 +360,7 @@ void EcallTask_PostEvent(EcallTaskEvent_t enEvent)
 *******************************************************/
 void EcallTask_RequestTrigger(EcallTrigger_t enTrigger)
 {
+    uint32_t u32TriggerMs;
     uint8_t u8TriggerMask;
     uint8_t u8NeedWake = 0U;
 
@@ -275,7 +370,12 @@ void EcallTask_RequestTrigger(EcallTrigger_t enTrigger)
         return;
     }
 
+    u32TriggerMs = osKernelSysTick();
     portENTER_CRITICAL();
+    if (m_u8PendingTriggerMask == 0U)
+    {
+        s_mEcallTaskTriggerTimeRun.u32PendingTriggerMs = u32TriggerMs;
+    }
     m_u8PendingTriggerMask |= u8TriggerMask;
     if (m_u8TriggerWakePending == 0U)
     {

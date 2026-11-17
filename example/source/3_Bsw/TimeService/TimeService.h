@@ -29,6 +29,8 @@ typedef enum
 
 void TimeService_Init(void);
 void TimeService_Process(void);
+/* Return current Unix UTC seconds and the selected source. */
+uint8_t TimeService_GetUtcSeconds(uint32_t *pu32UtcSeconds);
 uint8_t TimeService_GetUtc(TimeServiceTime_t *pstTime);
 
 #endif

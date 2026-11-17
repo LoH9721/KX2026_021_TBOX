@@ -335,7 +335,12 @@ static void ModemPort_HandleResponseLine(const char *pcLine)
         return;
     }
 
-    if (ModemPort_Contains(pcLine, "VOICE CALL: BEGIN") != 0U)
+    if ((strcmp(pcLine, "RING") == 0)
+        || (strncmp(pcLine, "+CRING:", 7U) == 0))
+    {
+        m_stModemPortStatus.enVoiceEvent = MODEM_PORT_VOICE_EVENT_INCOMING;
+    }
+    else if (ModemPort_Contains(pcLine, "VOICE CALL: BEGIN") != 0U)
     {
         m_stModemPortStatus.enVoiceEvent = MODEM_PORT_VOICE_EVENT_CONNECTED;
     }
@@ -354,7 +359,12 @@ static void ModemPort_HandleResponseLine(const char *pcLine)
     }
     else if (sscanf(pcLine, "+CLCC: %u,%u,%u", &u32CallIndex, &u32CallDirection, &u32CallStatus) == 3)
     {
-        if (u32CallStatus == 0U)
+        if ((u32CallDirection == 1U)
+            && ((u32CallStatus == 4U) || (u32CallStatus == 5U)))
+        {
+            m_stModemPortStatus.enVoiceEvent = MODEM_PORT_VOICE_EVENT_INCOMING;
+        }
+        else if (u32CallStatus == 0U)
         {
             m_stModemPortStatus.enVoiceEvent = MODEM_PORT_VOICE_EVENT_CONNECTED;
         }

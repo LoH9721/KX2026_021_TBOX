@@ -19,8 +19,9 @@
 
 typedef struct
 {
-    TimeServiceTime_t stTime;
+    uint32_t u32UtcSeconds;
     uint32_t u32SampleMs;
+    uint8_t u8Valid;
 } TimeServiceCache_t;
 
 typedef struct
@@ -61,6 +62,48 @@ static uint8_t TimeService_GetMonthDays(uint16_t u16Year, uint8_t u8Month)
     }
     return (uint8_t)(au8MonthDays[u8Month - 1U]
                      + (((u8Month == 2U) && (TimeService_IsLeapYear(u16Year) != 0U)) ? 1U : 0U));
+}
+
+/*******************************************************
+  * Name    :TimeService_CalendarToUtcSeconds
+  * Author  :LoH
+  * Function:Convert one validated UTC calendar value to seconds since 1970.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+static uint8_t TimeService_CalendarToUtcSeconds(const TimeServiceTime_t *pstTime,
+                                                uint32_t *pu32UtcSeconds)
+{
+    uint16_t u16Year;
+    uint16_t u16LoopYear;
+    uint32_t u32Days = 0U;
+    uint8_t u8Month;
+
+    if ((pstTime == 0) || (pu32UtcSeconds == 0)
+        || (pstTime->u8Year < 24U) || (pstTime->u8Month == 0U)
+        || (pstTime->u8Month > 12U) || (pstTime->u8Day == 0U)
+        || (pstTime->u8Hour > 23U) || (pstTime->u8Minute > 59U)
+        || (pstTime->u8Second > 59U)
+        || (pstTime->u8Day > TimeService_GetMonthDays((uint16_t)(2000U + pstTime->u8Year), pstTime->u8Month)))
+    {
+        return 0U;
+    }
+
+    u16Year = (uint16_t)(2000U + pstTime->u8Year);
+    for (u16LoopYear = 1970U; u16LoopYear < u16Year; u16LoopYear++)
+    {
+        u32Days += (TimeService_IsLeapYear(u16LoopYear) != 0U) ? 366U : 365U;
+    }
+    for (u8Month = 1U; u8Month < pstTime->u8Month; u8Month++)
+    {
+        u32Days += TimeService_GetMonthDays(u16Year, u8Month);
+    }
+
+    *pu32UtcSeconds = ((u32Days + (uint32_t)(pstTime->u8Day - 1U)) * 86400UL)
+                      + ((uint32_t)pstTime->u8Hour * 3600UL)
+                      + ((uint32_t)pstTime->u8Minute * 60UL)
+                      + pstTime->u8Second;
+    return 1U;
 }
 
 /*******************************************************
@@ -108,50 +151,6 @@ static void TimeService_UtcSecondsToCalendar(uint32_t u32UtcSeconds, TimeService
 }
 
 /*******************************************************
-  * Name    :TimeService_AddSeconds
-  * Author  :LoH
-  * Function:Advance one exported UTC calendar by whole seconds.
-  * Version :V1.0.0
-  * Data    :2026.09.13
-*******************************************************/
-static void TimeService_AddSeconds(TimeServiceTime_t *pstTime, uint32_t u32Seconds)
-{
-    uint16_t u16Year;
-
-    while (u32Seconds > 0U)
-    {
-        pstTime->u8Second++;
-        if (pstTime->u8Second >= 60U)
-        {
-            pstTime->u8Second = 0U;
-            pstTime->u8Minute++;
-            if (pstTime->u8Minute >= 60U)
-            {
-                pstTime->u8Minute = 0U;
-                pstTime->u8Hour++;
-                if (pstTime->u8Hour >= 24U)
-                {
-                    pstTime->u8Hour = 0U;
-                    pstTime->u8Day++;
-                    u16Year = (uint16_t)(2000U + pstTime->u8Year);
-                    if (pstTime->u8Day > TimeService_GetMonthDays(u16Year, pstTime->u8Month))
-                    {
-                        pstTime->u8Day = 1U;
-                        pstTime->u8Month++;
-                        if (pstTime->u8Month > 12U)
-                        {
-                            pstTime->u8Month = 1U;
-                            pstTime->u8Year++;
-                        }
-                    }
-                }
-            }
-        }
-        u32Seconds--;
-    }
-}
-
-/*******************************************************
   * Name    :TimeService_IsCacheFresh
   * Author  :LoH
   * Function:Return whether one source cache is valid at the current OS tick.
@@ -162,7 +161,7 @@ static uint8_t TimeService_IsCacheFresh(const TimeServiceCache_t *pstCache,
                                         uint32_t u32NowMs,
                                         uint32_t u32FreshnessMs)
 {
-    if (pstCache->u32SampleMs == 0U)
+    if (pstCache->u8Valid == 0U)
     {
         return 0U;
     }
@@ -199,46 +198,59 @@ void TimeService_Process(void)
 {
     EcallMsd_t stMsd;
     ModemTimeSample_t stCellularTime;
+    TimeServiceTime_t stUtcTime;
+    uint32_t u32UtcSeconds;
+    uint32_t u32SampleMs;
 
     if (GnssService_GetLatest(&stMsd) != 0U)
     {
+        u32SampleMs = osKernelSysTick();
         portENTER_CRITICAL();
-        TimeService_UtcSecondsToCalendar(stMsd.utc_seconds, &s_mTimeSvcRun.stGnssCache.stTime);
-        s_mTimeSvcRun.stGnssCache.u32SampleMs = osKernelSysTick();
+        if ((s_mTimeSvcRun.stGnssCache.u8Valid == 0U)
+            || (s_mTimeSvcRun.stGnssCache.u32UtcSeconds != stMsd.utc_seconds))
+        {
+            s_mTimeSvcRun.stGnssCache.u32UtcSeconds = stMsd.utc_seconds;
+            s_mTimeSvcRun.stGnssCache.u32SampleMs = u32SampleMs;
+            s_mTimeSvcRun.stGnssCache.u8Valid = 1U;
+        }
         portEXIT_CRITICAL();
     }
 
     if (ModemTime_TakeSample(&stCellularTime) != 0U)
     {
-        portENTER_CRITICAL();
-        s_mTimeSvcRun.stCellularCache.stTime.u8Year = stCellularTime.u8Year;
-        s_mTimeSvcRun.stCellularCache.stTime.u8Month = stCellularTime.u8Month;
-        s_mTimeSvcRun.stCellularCache.stTime.u8Day = stCellularTime.u8Day;
-        s_mTimeSvcRun.stCellularCache.stTime.u8Hour = stCellularTime.u8Hour;
-        s_mTimeSvcRun.stCellularCache.stTime.u8Minute = stCellularTime.u8Minute;
-        s_mTimeSvcRun.stCellularCache.stTime.u8Second = stCellularTime.u8Second;
-        s_mTimeSvcRun.stCellularCache.u32SampleMs = osKernelSysTick();
-        portEXIT_CRITICAL();
+        stUtcTime.u8Year = stCellularTime.u8Year;
+        stUtcTime.u8Month = stCellularTime.u8Month;
+        stUtcTime.u8Day = stCellularTime.u8Day;
+        stUtcTime.u8Hour = stCellularTime.u8Hour;
+        stUtcTime.u8Minute = stCellularTime.u8Minute;
+        stUtcTime.u8Second = stCellularTime.u8Second;
+        if (TimeService_CalendarToUtcSeconds(&stUtcTime, &u32UtcSeconds) != 0U)
+        {
+            portENTER_CRITICAL();
+            s_mTimeSvcRun.stCellularCache.u32UtcSeconds = u32UtcSeconds;
+            s_mTimeSvcRun.stCellularCache.u32SampleMs = osKernelSysTick();
+            s_mTimeSvcRun.stCellularCache.u8Valid = 1U;
+            portEXIT_CRITICAL();
+        }
     }
 }
 
 /*******************************************************
-  * Name    :TimeService_GetUtc
+  * Name    :TimeService_GetUtcSeconds
   * Author  :LoH
-  * Function:Return fresh GNSS UTC first, otherwise the cached cellular UTC.
+  * Function:Return current Unix UTC seconds from fresh GNSS or cached cellular time.
   * Version :V1.0.0
-  * Data    :2026.09.13
+  * Data    :2026.11.17
 *******************************************************/
-uint8_t TimeService_GetUtc(TimeServiceTime_t *pstTime)
+uint8_t TimeService_GetUtcSeconds(uint32_t *pu32UtcSeconds)
 {
-    TimeServiceTime_t stTime;
     TimeServiceCache_t stGnssCache;
     TimeServiceCache_t stCellularCache;
+    TimeServiceCache_t stSelectedCache;
     TimeServiceSource_t enSource = TIME_SERVICE_SOURCE_INVALID;
-    uint32_t u32SampleMs;
     uint32_t u32NowMs;
 
-    if (pstTime == 0)
+    if (pu32UtcSeconds == 0)
     {
         return TIME_SERVICE_SOURCE_INVALID;
     }
@@ -250,22 +262,49 @@ uint8_t TimeService_GetUtc(TimeServiceTime_t *pstTime)
     u32NowMs = osKernelSysTick();
     if (TimeService_IsCacheFresh(&stGnssCache, u32NowMs, TIME_SERVICE_GNSS_FRESHNESS_MS) != 0U)
     {
-        stTime = stGnssCache.stTime;
-        u32SampleMs = stGnssCache.u32SampleMs;
+        stSelectedCache = stGnssCache;
         enSource = TIME_SERVICE_SOURCE_GNSS;
     }
     else if (TimeService_IsCacheFresh(&stCellularCache, u32NowMs, TIME_SERVICE_CELLULAR_FRESHNESS_MS) != 0U)
     {
-        stTime = stCellularCache.stTime;
-        u32SampleMs = stCellularCache.u32SampleMs;
+        stSelectedCache = stCellularCache;
         enSource = TIME_SERVICE_SOURCE_CELLULAR;
     }
     else
     {
+        *pu32UtcSeconds = 0U;
+        return TIME_SERVICE_SOURCE_INVALID;
+    }
+
+    *pu32UtcSeconds = stSelectedCache.u32UtcSeconds
+                      + ((u32NowMs - stSelectedCache.u32SampleMs) / 1000UL);
+    return (uint8_t)enSource;
+}
+
+/*******************************************************
+  * Name    :TimeService_GetUtc
+  * Author  :LoH
+  * Function:Return current UTC calendar from the selected trusted time source.
+  * Version :V1.0.0
+  * Data    :2026.11.17
+*******************************************************/
+uint8_t TimeService_GetUtc(TimeServiceTime_t *pstTime)
+{
+    uint32_t u32UtcSeconds;
+    uint8_t u8Source;
+
+    if (pstTime == 0)
+    {
+        return TIME_SERVICE_SOURCE_INVALID;
+    }
+
+    u8Source = TimeService_GetUtcSeconds(&u32UtcSeconds);
+    if (u8Source == TIME_SERVICE_SOURCE_INVALID)
+    {
         (void)memset(pstTime, 0, sizeof(*pstTime));
         return TIME_SERVICE_SOURCE_INVALID;
     }
-    TimeService_AddSeconds(&stTime, (u32NowMs - u32SampleMs) / 1000UL);
-    *pstTime = stTime;
-    return (uint8_t)enSource;
+
+    TimeService_UtcSecondsToCalendar(u32UtcSeconds, pstTime);
+    return u8Source;
 }
